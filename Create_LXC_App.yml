@@ -148,14 +148,29 @@
         path: "/tmp/{{ ct_name }}-tailscale-join.sh"
         state: absent
 
-    - name: Run the Tailscale join script inside the container
-      ansible.builtin.command: pct exec {{ ctid }} -- /root/tailscale-join.sh
+    - name: Start the Tailscale join script inside the container (backgrounded - approval can take a while)
+      ansible.builtin.command: >-
+        pct exec {{ ctid }} -- bash -c "nohup /root/tailscale-join.sh </dev/null >/var/log/tailscale-join-wrapper.log 2>&1 & disown"
       changed_when: true
       no_log: true
+
+    - name: Check (briefly) whether the container is already reachable over the tailnet
+      ansible.builtin.wait_for:
+        host: "{{ ct_name }}"
+        port: 22
+        timeout: 60
+      delegate_to: localhost
+      become: false
+      register: lxc_tailnet_reachability
+      ignore_errors: true
 
     - name: Show access instructions
       ansible.builtin.debug:
         msg: >-
-          LXC container '{{ ct_name }}' (CTID {{ ctid }}) is running {{ app_choice }} directly on the Proxmox host
-          and is joined to the tailnet as '{{ ct_name }}'. To reach it from the normal internet, forward ports
-          80/443 on your edge router to this container's LAN IP (manual step, outside Ansible).
+          LXC container '{{ ct_name }}' (CTID {{ ctid }}) is running {{ app_choice }} directly on the Proxmox host.
+          {{ 'It is already reachable over Tailscale SSH as ' ~ ct_name ~ '.'
+             if lxc_tailnet_reachability is succeeded
+             else 'Not yet confirmed reachable over the tailnet - most likely still pending manual approval in '
+                  ~ 'your Tailscale admin console. Approve it there; no need to re-run this job once approved.' }}
+          To reach the app from the normal internet, forward ports 80/443 on your edge router to this
+          container's LAN IP (manual step, outside Ansible).
