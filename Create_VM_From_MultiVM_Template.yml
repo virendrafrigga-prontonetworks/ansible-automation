@@ -95,6 +95,7 @@
         port: 22
         timeout: 300
       delegate_to: localhost
+      become: false
 
     - name: Show success message
       ansible.builtin.debug:
