@@ -18,6 +18,12 @@
     cores: 1                                 # From AWX Survey
     ct_disk_gb: 8                            # From AWX Survey - plain GB number (pct's --rootfs unit, unlike qm resize's "8G" style)
     app_choice: "nginx"                      # From AWX Survey - only nginx supported today
+    # Unprivileged LXC containers often don't reliably pick up DNS via DHCP the
+    # way VMs do - set it explicitly rather than depending on that. Public
+    # resolver on purpose: the container hasn't joined the tailnet yet at this
+    # point, so a tailnet-only resolver (e.g. 100.100.100.100) wouldn't be
+    # reachable from it regardless.
+    ct_nameserver: "1.1.1.1"                 # From AWX Survey
 
     # From AWX Credential/Vault - a Reusable + Tagged Tailscale auth key
     # (not Ephemeral), same one used by Playbook 1. Never hardcode a real key here.
@@ -100,6 +106,7 @@
         --cores {{ cores }}
         --rootfs {{ storage }}:{{ ct_disk_gb }}
         --net0 name=eth0,bridge={{ bridge }},ip=dhcp
+        --nameserver {{ ct_nameserver }}
         --unprivileged 1
         --features nesting=1
       args:
