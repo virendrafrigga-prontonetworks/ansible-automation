@@ -1,0 +1,128 @@
+---
+- name: Register the target VM for this run
+  hosts: localhost
+  gather_facts: false
+  vars:
+    target_host: "dev-vm01"          # From AWX Survey - the VM's tailnet hostname (vm_name from Playbook 1)
+  tasks:
+    - name: Add target VM to in-memory inventory
+      ansible.builtin.add_host:
+        name: "{{ target_host }}"
+        groups: docker_target
+
+- name: Install Docker, Compose and Traefik, then deploy the chosen app
+  hosts: docker_target
+  become: true
+  gather_facts: true
+
+  vars:
+    app_choice: "nginx"                       # From AWX Survey - nginx | wordpress | portainer
+    app_hostname: "{{ target_host }}"          # From AWX Survey - Host() the app should answer to behind Traefik
+    wordpress_db_password: ""                  # From AWX Survey/Vault - required when app_choice == wordpress
+
+  tasks:
+    - name: Check if Docker is already installed
+      ansible.builtin.command: docker --version
+      register: docker_check
+      changed_when: false
+      failed_when: false
+
+    - name: Install Docker (Debian/Ubuntu)
+      when: docker_check.rc != 0 and ansible_facts['os_family'] == "Debian"
+      ansible.builtin.apt:
+        name:
+          - docker.io
+          - docker-compose-v2
+        state: present
+        update_cache: true
+
+    - name: Install Docker (RHEL/CentOS family)
+      when: docker_check.rc != 0 and ansible_facts['os_family'] == "RedHat"
+      block:
+        - name: Install dnf-plugins-core
+          ansible.builtin.dnf:
+            name: dnf-plugins-core
+            state: present
+
+        - name: Add Docker CE repo
+          ansible.builtin.command: dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
+          args:
+            creates: /etc/yum.repos.d/docker-ce.repo
+
+        - name: Install Docker CE and Compose plugin
+          ansible.builtin.dnf:
+            name:
+              - docker-ce
+              - docker-ce-cli
+              - containerd.io
+              - docker-compose-plugin
+            state: present
+
+    - name: Ensure Docker service is running
+      ansible.builtin.systemd:
+        name: docker
+        state: started
+        enabled: true
+
+    - name: Check whether the shared 'web' Docker network exists
+      ansible.builtin.command: docker network inspect web
+      register: web_network_check
+      changed_when: false
+      failed_when: false
+
+    - name: Create shared 'web' Docker network for Traefik routing
+      ansible.builtin.command: docker network create web
+      when: web_network_check.rc != 0
+
+    - name: Deploy Traefik reverse proxy
+      block:
+        - name: Ensure Traefik directory exists
+          ansible.builtin.file:
+            path: /opt/traefik
+            state: directory
+            mode: "0755"
+
+        - name: Template Traefik compose file
+          ansible.builtin.template:
+            src: docker_apps/traefik-compose.yml.j2
+            dest: /opt/traefik/docker-compose.yml
+            mode: "0644"
+
+        - name: Start Traefik
+          ansible.builtin.command: docker compose up -d
+          args:
+            chdir: /opt/traefik
+          changed_when: true
+
+    - name: Deploy the selected application
+      block:
+        - name: Ensure app directory exists
+          ansible.builtin.file:
+            path: "/opt/{{ app_choice }}"
+            state: directory
+            mode: "0755"
+
+        - name: Template app compose file
+          ansible.builtin.template:
+            src: "docker_apps/{{ app_choice }}.yml.j2"
+            dest: "/opt/{{ app_choice }}/docker-compose.yml"
+            mode: "0644"
+          no_log: "{{ app_choice == 'wordpress' }}"
+
+        - name: Start the application
+          ansible.builtin.command: docker compose up -d
+          args:
+            chdir: "/opt/{{ app_choice }}"
+          changed_when: true
+
+    - name: Mark this node as a Tailscale docker-host (per team tag scheme)
+      ansible.builtin.command: tailscale set --advertise-tags=tag:vm-provisioned,tag:docker-host
+      changed_when: true
+      # Requires your tailnet ACL's tagOwners to permit this node re-tagging itself as tag:docker-host.
+
+    - name: Show access instructions
+      ansible.builtin.debug:
+        msg: >-
+          Docker app '{{ app_choice }}' deployed on {{ target_host }}, routed through Traefik on ports 80/443
+          for Host(`{{ app_hostname }}`). Traefik is already reachable now over the tailnet; to reach it from the
+          normal internet, forward ports 80/443 on your edge router to this VM's LAN IP (manual step, outside Ansible).

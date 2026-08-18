@@ -1,0 +1,27 @@
+#cloud-config
+hostname: {{ vm_name }}
+manage_etc_hosts: true
+
+users:
+  - name: {{ vm_user }}
+    gecos: Provisioned by Ansible
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    shell: /bin/bash
+    lock_passwd: true
+    ssh_authorized_keys:
+      - {{ vm_ssh_public_key }}
+
+package_update: true
+packages:
+  - qemu-guest-agent
+  - curl
+
+write_files:
+  - path: /usr/local/bin/tailscale-join.sh
+    permissions: '0700'
+    content: |
+      {{ tailscale_join_script | indent(6) }}
+
+runcmd:
+  - systemctl enable --now qemu-guest-agent
+  - /usr/local/bin/tailscale-join.sh

@@ -1,0 +1,150 @@
+---
+- name: Create an LXC container and deploy an app directly on Proxmox
+  hosts: all
+  gather_facts: true
+  become: true
+
+  vars:
+    local_cache_dir: "{{ playbook_dir }}/.image_cache"
+    storage: "local-lvm"                  # From AWX Survey
+    bridge: "vmbr0"                        # From AWX Survey
+    os_template: "ubuntu-24.04-standard"    # From AWX Survey - Proxmox LXC template name (no version/arch suffix)
+    ct_name: "app-lxc01"                    # From AWX Survey
+    memory: 1024                             # From AWX Survey
+    cores: 1                                 # From AWX Survey
+    ct_disk_gb: 8                            # From AWX Survey - plain GB number (pct's --rootfs unit, unlike qm resize's "8G" style)
+    app_choice: "nginx"                      # From AWX Survey - only nginx supported today
+
+    # From AWX Credential/Vault - a Reusable + Tagged Tailscale auth key
+    # (not Ephemeral), same one used by Playbook 1. Never hardcode a real key here.
+    tailscale_authkey: ""
+    # Extending your team's tag scheme (tag:vm-provisioned / tag:docker-host)
+    # with a matching tag:lxc-host - adjust if you want a different name.
+    tailscale_tag: "tag:lxc-host"
+
+  tasks:
+    - name: List LXC templates already present on this storage
+      ansible.builtin.command: pveam list {{ storage }}
+      register: pveam_list
+      changed_when: false
+
+    - name: Stage and push the LXC template if missing
+      when: os_template not in pveam_list.stdout
+      block:
+        - name: Look up the exact template filename from the Proxmox appliance catalog
+          ansible.builtin.command: pveam available --section system
+          register: pveam_available
+          changed_when: false
+
+        # Best-effort parse of `pveam available` output ("system  <filename>" columns) -
+        # verify this still matches the column format on your Proxmox version.
+        - name: Extract the matching template filename
+          ansible.builtin.set_fact:
+            lxc_template_filename: >-
+              {{ (pveam_available.stdout_lines | select('search', os_template) | list | first).split() | last }}
+
+        - name: Ensure local image cache directory exists on the Ansible worker
+          ansible.builtin.file:
+            path: "{{ local_cache_dir }}"
+            state: directory
+            mode: "0755"
+          delegate_to: localhost
+          become: false
+
+        - name: Download LXC template on the Ansible worker
+          ansible.builtin.get_url:
+            url: "http://download.proxmox.com/images/system/{{ lxc_template_filename }}"
+            dest: "{{ local_cache_dir }}/{{ lxc_template_filename }}"
+            mode: "0644"
+            force: false
+          delegate_to: localhost
+          become: false
+
+        - name: Push LXC template to the Proxmox host's template cache
+          ansible.builtin.copy:
+            src: "{{ local_cache_dir }}/{{ lxc_template_filename }}"
+            dest: "/var/lib/vz/template/cache/{{ lxc_template_filename }}"
+            mode: "0644"
+
+    - name: Re-list LXC templates to resolve the stored volume ID
+      ansible.builtin.shell: |
+        set -o pipefail
+        pveam list {{ storage }} | awk -v tmpl="{{ os_template }}" '$1 ~ tmpl {print $1}'
+      args:
+        executable: /bin/bash
+      register: pveam_resolved
+      changed_when: false
+
+    - name: Set resolved template volume ID
+      ansible.builtin.set_fact:
+        lxc_template_volid: "{{ pveam_resolved.stdout_lines | first }}"
+
+    - name: Get next free container ID
+      ansible.builtin.command: pvesh get /cluster/nextid
+      register: nextid
+      changed_when: false
+
+    - name: Set container ID fact
+      ansible.builtin.set_fact:
+        ctid: "{{ nextid.stdout | trim }}"
+
+    - name: Create the LXC container
+      ansible.builtin.command: >-
+        pct create {{ ctid }} {{ lxc_template_volid }}
+        --hostname {{ ct_name }}
+        --memory {{ memory }}
+        --cores {{ cores }}
+        --rootfs {{ storage }}:{{ ct_disk_gb }}
+        --net0 name=eth0,bridge={{ bridge }},ip=dhcp
+        --unprivileged 1
+        --features nesting=1
+      args:
+        creates: "/etc/pve/lxc/{{ ctid }}.conf"
+
+    - name: Start the container
+      ansible.builtin.command: pct start {{ ctid }}
+      changed_when: true
+
+    - name: Wait for the container's network to come up
+      ansible.builtin.pause:
+        seconds: 10
+
+    - name: Install the app inside the container
+      ansible.builtin.command: >-
+        pct exec {{ ctid }} -- bash -c "apt-get update && apt-get install -y curl {{ app_choice }}"
+      changed_when: true
+
+    - name: Render the Tailscale join script content (matches post_boot.sh's proven flags)
+      ansible.builtin.set_fact:
+        tailscale_join_script: "{{ lookup('template', playbook_dir + '/templates/tailscale-join.sh.j2') }}"
+      vars:
+        tailscale_hostname: "{{ ct_name }}"
+      no_log: true
+
+    - name: Stage the join script on the Proxmox host
+      ansible.builtin.copy:
+        content: "{{ tailscale_join_script }}"
+        dest: "/tmp/{{ ct_name }}-tailscale-join.sh"
+        mode: "0700"
+      no_log: true
+
+    - name: Push the join script into the container
+      ansible.builtin.command: pct push {{ ctid }} /tmp/{{ ct_name }}-tailscale-join.sh /root/tailscale-join.sh --perms 700
+      changed_when: true
+
+    - name: Remove the staged script from the Proxmox host
+      ansible.builtin.file:
+        path: "/tmp/{{ ct_name }}-tailscale-join.sh"
+        state: absent
+
+    - name: Run the Tailscale join script inside the container
+      ansible.builtin.command: pct exec {{ ctid }} -- /root/tailscale-join.sh
+      changed_when: true
+      no_log: true
+
+    - name: Show access instructions
+      ansible.builtin.debug:
+        msg: >-
+          LXC container '{{ ct_name }}' (CTID {{ ctid }}) is running {{ app_choice }} directly on the Proxmox host
+          and is joined to the tailnet as '{{ ct_name }}'. To reach it from the normal internet, forward ports
+          80/443 on your edge router to this container's LAN IP (manual step, outside Ansible).

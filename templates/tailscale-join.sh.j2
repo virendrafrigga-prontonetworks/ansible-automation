@@ -1,0 +1,57 @@
+#!/bin/bash
+# Mirrors the tailnet-join section of post_boot.sh (the proven pattern used
+# to onboard Proxmox baremetal hosts), parametrized for VMs/LXC containers.
+set -euo pipefail
+
+LOGFILE="/var/log/tailscale-install.log"
+exec > >(tee -a "$LOGFILE") 2>&1
+
+echo "[$(date -Is)] Starting Tailscale join..."
+
+export DEBIAN_FRONTEND=noninteractive
+
+if ! command -v tailscale >/dev/null 2>&1; then
+    echo "[$(date -Is)] Installing Tailscale..."
+    curl -fsSL https://tailscale.com/install.sh | sh
+fi
+
+TS_HOSTNAME="{{ tailscale_hostname }}"
+TS_TAGS="{{ tailscale_tag }}"
+TS_AUTHKEY="{{ tailscale_authkey }}"
+
+echo "[$(date -Is)] Starting Tailscale as $TS_HOSTNAME with tags $TS_TAGS..."
+
+tailscale up \
+    --auth-key="$TS_AUTHKEY" \
+    --hostname="$TS_HOSTNAME" \
+    --advertise-tags="$TS_TAGS" \
+    --ssh \
+    --accept-dns=true \
+    --reset \
+    >/var/log/tailscale-up.log 2>&1 &
+
+TS_UP_PID=$!
+unset TS_AUTHKEY
+
+echo "[$(date -Is)] Waiting for Tailscale approval..."
+
+CONNECTED=false
+for i in {1..360}; do
+    if tailscale ip >/dev/null 2>&1; then
+        CONNECTED=true
+        break
+    fi
+    echo "[$(date -Is)] Waiting for approval..."
+    sleep 5
+done
+
+wait "$TS_UP_PID" || true
+
+if [ "$CONNECTED" = true ]; then
+    echo "[$(date -Is)] Connected."
+    tailscale ip
+else
+    echo "[$(date -Is)] ERROR: Timed out waiting for Tailscale approval."
+    tailscale status || true
+    exit 1
+fi

@@ -1,0 +1,105 @@
+---
+- name: Ensure OS template exists, clone a VM from it, and join it to the tailnet
+  hosts: all
+  gather_facts: true
+  become: true
+
+  vars_files:
+    - vars/os_images.yml
+
+  vars:
+    proxmox_host: "{{ inventory_hostname }}"
+    iso_dir: "/var/lib/vz/template/iso"
+    local_cache_dir: "{{ playbook_dir }}/.image_cache"
+    storage: "local-lvm"                 # From AWX Survey
+    bridge: "vmbr0"                       # From AWX Survey
+
+    os_type: "ubuntu-24.04"               # From AWX Survey - ubuntu-24.04 | centos-9-stream
+
+    vm_name: "dev-vm01"                    # From AWX Survey
+    vm_user: "ubuntu"                      # From AWX Survey
+    memory: 2048                            # From AWX Survey
+    cores: 2                                # From AWX Survey
+    disk_size: "15G"                        # From AWX Survey
+
+    # From AWX Credential/Vault - a Reusable + Tagged Tailscale auth key
+    # (not Ephemeral - this VM should persist in the tailnet across reboots).
+    # Never hardcode a real key here.
+    tailscale_authkey: ""
+    tailscale_tag: "tag:vm-provisioned"
+    vm_ssh_public_key: "{{ lookup('file', playbook_dir + '/id_rsa.pub') }}"
+
+  tasks:
+    - name: Ensure the requested OS template exists
+      ansible.builtin.include_tasks: create_template_block.yml
+
+    - name: Get next free VM ID
+      ansible.builtin.command: pvesh get /cluster/nextid
+      register: nextid
+      changed_when: false
+
+    - name: Set new VM ID fact
+      ansible.builtin.set_fact:
+        new_vmid: "{{ nextid.stdout | trim }}"
+
+    - name: Clone the VM from the template
+      ansible.builtin.command: qm clone {{ template_id }} {{ new_vmid }} --name {{ vm_name }} --full
+      changed_when: true
+
+    - name: Configure cloned VM hardware
+      ansible.builtin.command: >-
+        qm set {{ new_vmid }}
+        --memory {{ memory }}
+        --cores {{ cores }}
+        --net0 virtio,bridge={{ bridge }}
+      changed_when: true
+
+    - name: Resize VM disk
+      ansible.builtin.command: qm resize {{ new_vmid }} scsi0 {{ disk_size }}
+      changed_when: true
+
+    - name: Ensure Proxmox snippets storage directory exists
+      ansible.builtin.file:
+        path: /var/lib/vz/snippets
+        state: directory
+        mode: "0755"
+
+    - name: Render the Tailscale join script content (matches post_boot.sh's proven flags)
+      ansible.builtin.set_fact:
+        tailscale_join_script: "{{ lookup('template', playbook_dir + '/templates/tailscale-join.sh.j2') }}"
+      vars:
+        tailscale_hostname: "{{ vm_name }}"
+      no_log: true
+
+    - name: Render per-VM cloud-init user-data onto the Proxmox host
+      ansible.builtin.template:
+        src: vm-cloud-init.yml.j2
+        dest: "/var/lib/vz/snippets/{{ vm_name }}-cloud-init.yml"
+        mode: "0600"
+      no_log: true
+
+    - name: Attach custom cloud-init user-data and DHCP networking to the VM
+      ansible.builtin.command: >-
+        qm set {{ new_vmid }}
+        --cicustom "user=local:snippets/{{ vm_name }}-cloud-init.yml"
+        --ipconfig0 ip=dhcp
+      changed_when: true
+
+    - name: Start the VM
+      ansible.builtin.command: qm start {{ new_vmid }}
+      changed_when: true
+
+    - name: Wait for the VM to join the tailnet and become reachable over SSH
+      ansible.builtin.wait_for:
+        host: "{{ vm_name }}"
+        port: 22
+        timeout: 300
+      delegate_to: localhost
+
+    - name: Show success message
+      ansible.builtin.debug:
+        msg: >-
+          VM '{{ vm_name }}' (VMID {{ new_vmid }}) cloned from template '{{ template_name }}' and started.
+          It should be reachable over Tailscale SSH as '{{ vm_name }}' once approved in your tailnet
+          (see complete_project_guide.txt step 2) - no separate SSH password is set up, access is via
+          Tailscale SSH + ACL only.

@@ -1,0 +1,16 @@
+version: "3.8"
+
+networks:
+  web:
+    external: true
+
+services:
+  nginx:
+    image: nginx:latest
+    restart: unless-stopped
+    networks:
+      - web
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.nginx.rule=Host(`{{ app_hostname }}`)"
+      - "traefik.http.services.nginx.loadbalancer.server.port=80"

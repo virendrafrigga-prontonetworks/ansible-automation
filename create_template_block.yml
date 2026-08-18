@@ -1,129 +1,121 @@
+# Included (not run directly) with os_type, os_image_lookup, iso_dir,
+# local_cache_dir, storage, bridge, memory, cores already set by the caller.
+# Leaves `template_id` and `template_name` set in the parent scope either way.
+
 - name: Set template name and image URL for {{ os_type }}
-  set_fact:
+  ansible.builtin.set_fact:
     template_name: "{{ os_image_lookup[os_type]['name'] }}"
     image_url: "{{ os_image_lookup[os_type]['url'] }}"
 
-- name: Set image file path and template ID for {{ os_type }}
-  set_fact:
-    image_file: "{{ iso_dir }}/{{ image_url | basename }}"
-    template_id: >-
-      {{ (qm_list.stdout_lines[1:] | map('split') | map('first') | map('int') | list | max + 1) if qm_list.stdout_lines|length > 1 else 9000 }}
-
-- name: Write SSH public key to temporary file
-  copy:
-    content: "{{ ssh_key }}"
-    dest: "/tmp/admin_id_rsa.pub"
-
-- name: Download Cloud Image for {{ os_type }}
-  ansible.builtin.get_url:
-    url: "{{ image_url }}"
-    dest: "{{ image_file }}"
-    mode: "0644"
-    force: no
-
-- name: Create VM for {{ os_type }} template
-  ansible.builtin.command:
-    cmd: >-
-      qm create {{ template_id }}
-      --name {{ template_name }}
-      --memory {{ memory }}
-      --cores {{ cores }}
-      --net0 virtio,bridge={{ bridge }}
+- name: Check whether this template already exists on the Proxmox host
+  ansible.builtin.shell: |
+    set -o pipefail
+    qm list | awk -v name="{{ template_name }}" '$2==name {print $1}'
   args:
-    creates: "/etc/pve/qemu-server/{{ template_id }}.conf"
+    executable: /bin/bash
+  register: existing_template
+  changed_when: false
 
-- name: Import disk to storage
-  ansible.builtin.command:
-    cmd: >-
-      qm importdisk {{ template_id }} {{ image_file }} {{ storage }}
+- name: Record existing template ID, if found
+  ansible.builtin.set_fact:
+    template_id: "{{ existing_template.stdout | trim }}"
+  when: existing_template.stdout | trim | length > 0
 
-- name: Configure VM hardware for disk
-  ansible.builtin.command:
-    cmd: >-
-      qm set {{ template_id }}
-      --scsihw virtio-scsi-pci
-      --scsi0 {{ storage }}:vm-{{ template_id }}-disk-0
-      
-- name: Configure VM hardware for cloud-init
-  ansible.builtin.command:
-    cmd: >-
-      qm set {{ template_id }}
-      --ide2 {{ storage }}:cloudinit
- 
-- name: Configure VM hardware for boot disk
-  ansible.builtin.command:
-    cmd: >-
-      qm set {{ template_id }}
-      --boot c --bootdisk scsi0
+- name: Build and register the template if it doesn't already exist
+  when: existing_template.stdout | trim | length == 0
+  block:
+    - name: Set image filenames
+      ansible.builtin.set_fact:
+        local_image_file: "{{ local_cache_dir }}/{{ image_url | basename }}"
+        remote_image_file: "{{ iso_dir }}/{{ image_url | basename }}"
 
-- name: Configure VM hardware for boot disk
-  ansible.builtin.command:
-    cmd: >-
-      qm set {{ template_id }}
-      --serial0 socket --vga serial0
+    - name: Ensure local image cache directory exists on the Ansible worker
+      ansible.builtin.file:
+        path: "{{ local_cache_dir }}"
+        state: directory
+        mode: "0755"
+      delegate_to: localhost
+      become: false
 
+    - name: Download cloud image on the Ansible worker
+      ansible.builtin.get_url:
+        url: "{{ image_url }}"
+        dest: "{{ local_image_file }}"
+        mode: "0644"
+        force: false
+      delegate_to: localhost
+      become: false
 
-# - name: Ensure snippet directory exists
-#   file:
-#     path: "{{ snippet_path }}"
-#     state: directory
-#     mode: '0755'
+    - name: Ensure ISO directory exists on the Proxmox host
+      ansible.builtin.file:
+        path: "{{ iso_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
 
-# - name: Copy cloud-init user-data file to Proxmox snippets
-#   copy:
-#     src: cloud-init.yml
-#     dest: "{{ snippet_path }}/{{ snippet_filename }}"
-#     mode: '0644'
+    - name: Check whether the image is already staged on the Proxmox host
+      ansible.builtin.stat:
+        path: "{{ remote_image_file }}"
+      register: remote_image_stat
 
-# - name: Attach cloud-init user-data snippet to VM
-#   command: >
-#     qm set {{ template_id }}
-#     --cicustom "user={{ storage }}:snippets/{{ snippet_filename }}"
+    - name: Push the cloud image from the Ansible worker to the Proxmox host
+      ansible.builtin.copy:
+        src: "{{ local_image_file }}"
+        dest: "{{ remote_image_file }}"
+        mode: "0644"
+      when: not remote_image_stat.stat.exists
 
-- name: Set cloud-init user, password, and SSH key
-  ansible.builtin.command:
-    cmd: >-
-      qm set {{ template_id }}
-      --cipassword '{{ vm_password }}'
-      --sshkey /tmp/admin_id_rsa.pub
+    - name: Get next free template ID
+      ansible.builtin.command: pvesh get /cluster/nextid
+      register: nextid
+      changed_when: false
 
-# - name: Configure Cloud-init ssh key
-#   ansible.builtin.command:
-#     cmd: >-
-#       qm set {{ template_id }}
-#       --sshkey /tmp/admin_id_rsa.pub
-      
-- name: Configure VM hardware for dhcp boot
-  ansible.builtin.command:
-    cmd: >-
-      qm set {{ template_id }}
-      --ipconfig0 ip=dhcp
+    - name: Set new template ID fact
+      ansible.builtin.set_fact:
+        template_id: "{{ nextid.stdout | trim }}"
 
-# - name: Resize disk to {{ disk_size }}
-#   ansible.builtin.command:
-#     cmd: >-
-#       qm resize {{ template_id }} scsi0 {{ disk_size }}
+    - name: Create VM shell for the template
+      ansible.builtin.command: >-
+        qm create {{ template_id }}
+        --name {{ template_name }}
+        --memory {{ memory }}
+        --cores {{ cores }}
+        --net0 virtio,bridge={{ bridge }}
+      args:
+        creates: "/etc/pve/qemu-server/{{ template_id }}.conf"
 
-- name: Enable QEMU Guest Agent
-  ansible.builtin.command:
-    cmd: >-
-      qm set {{ template_id }} --agent enabled=1
+    - name: Import disk to storage
+      ansible.builtin.command: qm importdisk {{ template_id }} {{ remote_image_file }} {{ storage }}
+      changed_when: true
 
-# - name: Set cloud-init user, password, and SSH key
-#   ansible.builtin.command:
-#     cmd: >-
-#       qm set {{ template_id }}
-#       --ciuser {{ vm_user }}
-#       --cipassword '{{ vm_password }}'
-#       --sshkey "{{ ssh_key }}"
-#   when: vm_user is defined and vm_password is defined and ssh_key is defined
+    - name: Configure VM hardware for disk
+      ansible.builtin.command: >-
+        qm set {{ template_id }}
+        --scsihw virtio-scsi-pci
+        --scsi0 {{ storage }}:vm-{{ template_id }}-disk-0
+      changed_when: true
 
+    - name: Configure VM hardware for cloud-init
+      ansible.builtin.command: qm set {{ template_id }} --ide2 {{ storage }}:cloudinit
+      changed_when: true
 
-- name: Convert VM to a template
-  ansible.builtin.command:
-    cmd: >-
-      qm template {{ template_id }}
+    - name: Configure boot order
+      ansible.builtin.command: qm set {{ template_id }} --boot c --bootdisk scsi0
+      changed_when: true
 
-- name: Show template creation message
-  debug:
-    msg: "Cloud-Init template '{{ template_name }}' with ID {{ template_id }} has been created for OS {{ os_type }}."
+    - name: Configure serial console
+      ansible.builtin.command: qm set {{ template_id }} --serial0 socket --vga serial0
+      changed_when: true
+
+    - name: Enable QEMU Guest Agent flag
+      ansible.builtin.command: qm set {{ template_id }} --agent enabled=1
+      changed_when: true
+
+    - name: Convert VM to a template
+      ansible.builtin.command: qm template {{ template_id }}
+      changed_when: true
+
+    - name: Show template creation message
+      ansible.builtin.debug:
+        msg: "Cloud-init template '{{ template_name }}' with ID {{ template_id }} created for OS {{ os_type }}."

@@ -1,49 +1,27 @@
 ---
-- name: Create Cloud-Init Templates on Proxmox
+- name: Pre-seed Cloud-Init Templates on Proxmox
   hosts: all
   gather_facts: false
   become: true
 
+  vars_files:
+    - vars/os_images.yml
+
   vars:
     iso_dir: "/var/lib/vz/template/iso"
-    storage: "local-lvm"                   # Set from AWX Survey
-    bridge: "vmbr0"                         # Set from AWX Survey
+    local_cache_dir: "{{ playbook_dir }}/.image_cache"
+    storage: "local-lvm"                   # From AWX Survey
+    bridge: "vmbr0"                        # From AWX Survey
     memory: 2048                            # Optional via AWX
     cores: 2                                # Optional via AWX
-    disk_size: "2G"                        # Optional via AWX
-    ssh_key: "{{ lookup('file', './id_rsa.pub') }}"
-    vm_password: ubuntu
-    # snippet_filename: "cloud-init.yml"
-    # storage: local-lvm         # or whatever storage holds your snippets
-    # snippet_path: "/var/lib/vz/snippets"
 
-    # OS image lookup table
-    os_image_lookup:
-      ubuntu-22.04:
-        name: "ubuntu-22.04-template"
-        url: "https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img"
-      debian-12:
-        name: "debian-12-template"
-        url: "https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-genericcloud-amd64.qcow2"
-      centos-9:
-        name: "centos-9-template"
-        url: "https://cloud.centos.org/centos/9-stream/x86_64/images/CentOS-Stream-GenericCloud-9-latest.x86_64.qcow2"
+    os_types:                               # From AWX Survey (multi-select)
+      - ubuntu-24.04
+      - centos-9-stream
 
   tasks:
-    - name: Ensure ISO directory exists
-      ansible.builtin.file:
-        path: "{{ iso_dir }}"
-        state: directory
-        owner: root
-        group: root
-        mode: "0755"
-
-    - name: Get current list of VMs
-      command: qm list
-      register: qm_list
-
-    - name: Loop through OS types to create templates
-      include_tasks: create_template_block.yml
+    - name: Loop through selected OS types to ensure templates exist
+      ansible.builtin.include_tasks: create_template_block.yml
       loop: "{{ os_types }}"
       loop_control:
         loop_var: os_type

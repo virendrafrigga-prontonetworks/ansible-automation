@@ -1,0 +1,40 @@
+version: "3.8"
+
+networks:
+  web:
+    external: true
+
+volumes:
+  wp_db_data:
+  wp_data:
+
+services:
+  wordpress_db:
+    image: mysql:8.0
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: wordpress
+      MYSQL_USER: wordpress
+      MYSQL_PASSWORD: "{{ wordpress_db_password }}"
+      MYSQL_RANDOM_ROOT_PASSWORD: "yes"
+    volumes:
+      - wp_db_data:/var/lib/mysql
+
+  wordpress:
+    image: wordpress:latest
+    restart: unless-stopped
+    depends_on:
+      - wordpress_db
+    environment:
+      WORDPRESS_DB_HOST: wordpress_db
+      WORDPRESS_DB_USER: wordpress
+      WORDPRESS_DB_PASSWORD: "{{ wordpress_db_password }}"
+      WORDPRESS_DB_NAME: wordpress
+    volumes:
+      - wp_data:/var/www/html
+    networks:
+      - web
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.wordpress.rule=Host(`{{ app_hostname }}`)"
+      - "traefik.http.services.wordpress.loadbalancer.server.port=80"

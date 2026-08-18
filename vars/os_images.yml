@@ -1,0 +1,11 @@
+---
+# Shared OS catalog for VM cloud-init templates. Only Ubuntu (latest LTS) and
+# CentOS Stream (the only still-free CentOS variant) are supported, per the
+# Aug 2026 scope decision to drop Debian from the template flow.
+os_image_lookup:
+  ubuntu-24.04:
+    name: "ubuntu-24.04-template"
+    url: "https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img"
+  centos-9-stream:
+    name: "centos-9-stream-template"
+    url: "https://cloud.centos.org/centos/9-stream/x86_64/images/CentOS-Stream-GenericCloud-9-latest.x86_64.qcow2"
