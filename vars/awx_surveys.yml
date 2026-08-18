@@ -1,0 +1,125 @@
+---
+provision_vm_survey:
+  name: ""
+  description: ""
+  spec:
+    - question_name: "OS Type"
+      type: multiplechoice
+      variable: os_type
+      required: true
+      choices: "ubuntu-24.04\ncentos-9-stream"
+      default: "ubuntu-24.04"
+    - question_name: "VM Name"
+      type: text
+      variable: vm_name
+      required: true
+    - question_name: "VM User"
+      type: text
+      variable: vm_user
+      required: false
+      default: "pronto"
+    - question_name: "Memory (MB)"
+      type: integer
+      variable: memory
+      required: false
+      default: 2048
+    - question_name: "CPU Cores"
+      type: integer
+      variable: cores
+      required: false
+      default: 2
+    - question_name: "Disk Size"
+      type: text
+      variable: disk_size
+      required: false
+      default: "15G"
+    - question_name: "Storage"
+      type: text
+      variable: storage
+      required: false
+      default: "local-lvm"
+    - question_name: "Bridge"
+      type: text
+      variable: bridge
+      required: false
+      default: "vmbr0"
+    - question_name: "Tailscale Auth Key"
+      type: password
+      variable: tailscale_authkey
+      required: true
+
+install_docker_app_survey:
+  name: ""
+  description: ""
+  spec:
+    - question_name: "Target Host"
+      question_description: "Tailnet hostname of the VM from the Provision VM job (vm_name)"
+      type: text
+      variable: target_host
+      required: true
+    - question_name: "App Choice"
+      type: multiplechoice
+      variable: app_choice
+      required: true
+      choices: "nginx\nwordpress\nportainer"
+      default: "nginx"
+    - question_name: "App Hostname"
+      question_description: "Host() Traefik should route for this app - defaults to target_host if left blank"
+      type: text
+      variable: app_hostname
+      required: false
+      default: ""
+    - question_name: "WordPress DB Password"
+      question_description: "Only used when App Choice = wordpress"
+      type: password
+      variable: wordpress_db_password
+      required: false
+      default: ""
+
+create_lxc_app_survey:
+  name: ""
+  description: ""
+  spec:
+    - question_name: "Container Name"
+      type: text
+      variable: ct_name
+      required: true
+    - question_name: "OS Template"
+      type: text
+      variable: os_template
+      required: false
+      default: "ubuntu-24.04-standard"
+    - question_name: "Memory (MB)"
+      type: integer
+      variable: memory
+      required: false
+      default: 1024
+    - question_name: "CPU Cores"
+      type: integer
+      variable: cores
+      required: false
+      default: 1
+    - question_name: "Disk Size (GB)"
+      type: integer
+      variable: ct_disk_gb
+      required: false
+      default: 8
+    - question_name: "Storage"
+      type: text
+      variable: storage
+      required: false
+      default: "local-lvm"
+    - question_name: "Bridge"
+      type: text
+      variable: bridge
+      required: false
+      default: "vmbr0"
+    - question_name: "App Choice"
+      type: text
+      variable: app_choice
+      required: false
+      default: "nginx"
+    - question_name: "Tailscale Auth Key"
+      type: password
+      variable: tailscale_authkey
+      required: true

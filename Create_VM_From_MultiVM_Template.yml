@@ -17,7 +17,7 @@
     os_type: "ubuntu-24.04"               # From AWX Survey - ubuntu-24.04 | centos-9-stream
 
     vm_name: "dev-vm01"                    # From AWX Survey
-    vm_user: "ubuntu"                      # From AWX Survey
+    vm_user: "pronto"                      # From AWX Survey - standard automation user, matches post_boot.sh's baremetal convention
     memory: 2048                            # From AWX Survey
     cores: 2                                # From AWX Survey
     disk_size: "15G"                        # From AWX Survey
