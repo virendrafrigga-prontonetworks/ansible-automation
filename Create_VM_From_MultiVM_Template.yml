@@ -33,74 +33,96 @@
     - name: Ensure the requested OS template exists
       ansible.builtin.include_tasks: create_template_block.yml
 
-    - name: Get next free VM ID
-      ansible.builtin.command: pvesh get /cluster/nextid
-      register: nextid
+    - name: Check whether a VM with this name already exists
+      ansible.builtin.shell: |
+        set -o pipefail
+        qm list | awk -v name="{{ vm_name }}" '$2==name {print $1}'
+      args:
+        executable: /bin/bash
+      register: existing_vm
       changed_when: false
 
-    - name: Set new VM ID fact
+    - name: Record existing VM ID, if found
       ansible.builtin.set_fact:
-        new_vmid: "{{ nextid.stdout | trim }}"
+        new_vmid: "{{ existing_vm.stdout | trim }}"
+      when: existing_vm.stdout | trim | length > 0
 
-    - name: Clone the VM from the template
-      ansible.builtin.command: qm clone {{ template_id }} {{ new_vmid }} --name {{ vm_name }} --full
-      changed_when: true
+    - name: Clone and configure the VM if one with this name doesn't already exist
+      when: existing_vm.stdout | trim | length == 0
+      block:
+        - name: Get next free VM ID
+          ansible.builtin.command: pvesh get /cluster/nextid
+          register: nextid
+          changed_when: false
 
-    - name: Configure cloned VM hardware
-      ansible.builtin.command: >-
-        qm set {{ new_vmid }}
-        --memory {{ memory }}
-        --cores {{ cores }}
-        --net0 virtio,bridge={{ bridge }}
-      changed_when: true
+        - name: Set new VM ID fact
+          ansible.builtin.set_fact:
+            new_vmid: "{{ nextid.stdout | trim }}"
 
-    - name: Resize VM disk
-      ansible.builtin.command: qm resize {{ new_vmid }} scsi0 {{ disk_size }}
-      changed_when: true
+        - name: Clone the VM from the template
+          ansible.builtin.command: qm clone {{ template_id }} {{ new_vmid }} --name {{ vm_name }} --full
+          changed_when: true
 
-    - name: Ensure Proxmox snippets storage directory exists
-      ansible.builtin.file:
-        path: /var/lib/vz/snippets
-        state: directory
-        mode: "0755"
+        - name: Configure cloned VM hardware
+          ansible.builtin.command: >-
+            qm set {{ new_vmid }}
+            --memory {{ memory }}
+            --cores {{ cores }}
+            --net0 virtio,bridge={{ bridge }}
+          changed_when: true
 
-    - name: Render the Tailscale join script content (matches post_boot.sh's proven flags)
-      ansible.builtin.set_fact:
-        tailscale_join_script: "{{ lookup('template', playbook_dir + '/templates/tailscale-join.sh.j2') }}"
-      vars:
-        tailscale_hostname: "{{ vm_name }}"
-      no_log: true
+        - name: Resize VM disk
+          ansible.builtin.command: qm resize {{ new_vmid }} scsi0 {{ disk_size }}
+          changed_when: true
 
-    - name: Render per-VM cloud-init user-data onto the Proxmox host
-      ansible.builtin.template:
-        src: vm-cloud-init.yml.j2
-        dest: "/var/lib/vz/snippets/{{ vm_name }}-cloud-init.yml"
-        mode: "0600"
-      no_log: true
+        - name: Ensure Proxmox snippets storage directory exists
+          ansible.builtin.file:
+            path: /var/lib/vz/snippets
+            state: directory
+            mode: "0755"
 
-    - name: Attach custom cloud-init user-data and DHCP networking to the VM
-      ansible.builtin.command: >-
-        qm set {{ new_vmid }}
-        --cicustom "user=local:snippets/{{ vm_name }}-cloud-init.yml"
-        --ipconfig0 ip=dhcp
-      changed_when: true
+        - name: Render the Tailscale join script content (matches post_boot.sh's proven flags)
+          ansible.builtin.set_fact:
+            tailscale_join_script: "{{ lookup('template', playbook_dir + '/templates/tailscale-join.sh.j2') }}"
+          vars:
+            tailscale_hostname: "{{ vm_name }}"
+          no_log: true
 
-    - name: Start the VM
-      ansible.builtin.command: qm start {{ new_vmid }}
-      changed_when: true
+        - name: Render per-VM cloud-init user-data onto the Proxmox host
+          ansible.builtin.template:
+            src: vm-cloud-init.yml.j2
+            dest: "/var/lib/vz/snippets/{{ vm_name }}-cloud-init.yml"
+            mode: "0600"
+          no_log: true
 
-    - name: Wait for the VM to join the tailnet and become reachable over SSH
+        - name: Attach custom cloud-init user-data and DHCP networking to the VM
+          ansible.builtin.command: >-
+            qm set {{ new_vmid }}
+            --cicustom "user=local:snippets/{{ vm_name }}-cloud-init.yml"
+            --ipconfig0 ip=dhcp
+          changed_when: true
+
+        - name: Start the VM
+          ansible.builtin.command: qm start {{ new_vmid }}
+          changed_when: true
+
+    - name: Check (briefly) whether the VM is already reachable over the tailnet
       ansible.builtin.wait_for:
         host: "{{ vm_name }}"
         port: 22
-        timeout: 300
+        timeout: 60
       delegate_to: localhost
       become: false
+      register: tailnet_reachability
+      ignore_errors: true
 
-    - name: Show success message
+    - name: Show result
       ansible.builtin.debug:
         msg: >-
-          VM '{{ vm_name }}' (VMID {{ new_vmid }}) cloned from template '{{ template_name }}' and started.
-          It should be reachable over Tailscale SSH as '{{ vm_name }}' once approved in your tailnet
-          (see complete_project_guide.txt step 2) - no separate SSH password is set up, access is via
-          Tailscale SSH + ACL only.
+          VM '{{ vm_name }}' (VMID {{ new_vmid }}) is present and started - re-running this job with the same
+          vm_name reuses the existing VM instead of cloning a duplicate.
+          {{ 'It is already reachable over Tailscale SSH.'
+             if tailnet_reachability is succeeded
+             else 'Not yet confirmed reachable over the tailnet - most likely still pending manual approval in '
+                  ~ 'your Tailscale admin console (see complete_project_guide.txt step 2). Approve it there; '
+                  ~ 'no need to re-run this job once approved, just proceed to Install Docker/LXC whenever ready.' }}
