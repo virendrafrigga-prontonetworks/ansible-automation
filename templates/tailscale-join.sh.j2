@@ -15,9 +15,9 @@ if ! command -v tailscale >/dev/null 2>&1; then
     curl -fsSL https://tailscale.com/install.sh | sh
 fi
 
-TS_HOSTNAME="{{ tailscale_hostname }}"
-TS_TAGS="{{ tailscale_tag }}"
-TS_AUTHKEY="{{ tailscale_authkey }}"
+TS_HOSTNAME="{{ tailscale_hostname | trim }}"
+TS_TAGS="{{ tailscale_tag | trim }}"
+TS_AUTHKEY="{{ tailscale_authkey | trim }}"
 
 echo "[$(date -Is)] Starting Tailscale as $TS_HOSTNAME with tags $TS_TAGS..."
 
