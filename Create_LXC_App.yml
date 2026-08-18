@@ -6,7 +6,11 @@
 
   vars:
     local_cache_dir: "{{ playbook_dir }}/.image_cache"
-    storage: "local-lvm"                  # From AWX Survey
+    storage: "local-lvm"                  # From AWX Survey - block storage for the container's rootfs
+    # Container *templates* (vztmpl content) need a storage with that content type
+    # enabled - almost always "local" (directory storage), NOT local-lvm/block
+    # storage, which only supports disk images. Separate var from `storage` on purpose.
+    template_storage: "local"             # From AWX Survey
     bridge: "vmbr0"                        # From AWX Survey
     os_template: "ubuntu-24.04-standard"    # From AWX Survey - Proxmox LXC template name (no version/arch suffix)
     ct_name: "app-lxc01"                    # From AWX Survey
@@ -24,7 +28,7 @@
 
   tasks:
     - name: List LXC templates already present on this storage
-      ansible.builtin.command: pveam list {{ storage }}
+      ansible.builtin.command: pveam list {{ template_storage }}
       register: pveam_list
       changed_when: false
 
@@ -69,7 +73,7 @@
     - name: Re-list LXC templates to resolve the stored volume ID
       ansible.builtin.shell: |
         set -o pipefail
-        pveam list {{ storage }} | awk -v tmpl="{{ os_template }}" '$1 ~ tmpl {print $1}'
+        pveam list {{ template_storage }} | awk -v tmpl="{{ os_template }}" '$1 ~ tmpl {print $1}'
       args:
         executable: /bin/bash
       register: pveam_resolved
