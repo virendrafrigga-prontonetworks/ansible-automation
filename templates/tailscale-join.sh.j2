@@ -27,6 +27,7 @@ tailscale up \
     --advertise-tags="$TS_TAGS" \
     --ssh \
     --accept-dns=true \
+    --accept-risk=lose-ssh \
     --reset \
     >/var/log/tailscale-up.log 2>&1 &
 
