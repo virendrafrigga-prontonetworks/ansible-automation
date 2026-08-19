@@ -21,19 +21,18 @@ TS_AUTHKEY="{{ tailscale_authkey | trim }}"
 
 echo "[$(date -Is)] Starting Tailscale as $TS_HOSTNAME with tags $TS_TAGS..."
 
-# tailscale up --ssh behaves differently with no TTY attached at all (as under
-# systemd-run/cloud-init) versus run at a real terminal - confirmed by directly
-# comparing the two: identical key/tag/host, only difference was TTY presence,
-# and the no-TTY case falls back to a personal browser-login flow instead of
-# registering normally. `script` gives it a real pty to fix that.
-script -qec "tailscale up \
-    --auth-key=$TS_AUTHKEY \
-    --hostname=$TS_HOSTNAME \
-    --advertise-tags=$TS_TAGS \
+# A side-by-side comparison against a manual run that worked showed the only
+# difference was `sudo` - Ubuntu's default sudoers has `Defaults use_pty`,
+# which allocates a real pty for whatever it runs, even with no parent
+# terminal at all (unlike running the command directly as root).
+sudo tailscale up \
+    --auth-key="$TS_AUTHKEY" \
+    --hostname="$TS_HOSTNAME" \
+    --advertise-tags="$TS_TAGS" \
     --ssh \
     --accept-dns=true \
     --accept-risk=lose-ssh \
-    --reset" /dev/null \
+    --reset \
     >/var/log/tailscale-up.log 2>&1 &
 
 TS_UP_PID=$!
