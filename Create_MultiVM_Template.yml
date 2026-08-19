@@ -15,9 +15,13 @@
     memory: 2048                            # Optional via AWX
     cores: 2                                # Optional via AWX
 
-    os_types:                               # From AWX Survey (multi-select)
+    os_types:                               # From AWX Survey (multi-select) - any subset of vars/os_images.yml's keys
       - ubuntu-24.04
+      - ubuntu-22.04
+      - debian-12
       - centos-9-stream
+      - rocky-9
+      - almalinux-9
 
   tasks:
     - name: Loop through selected OS types to ensure templates exist
