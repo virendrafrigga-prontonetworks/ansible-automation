@@ -148,9 +148,13 @@
         path: "/tmp/{{ ct_name }}-tailscale-join.sh"
         state: absent
 
-    - name: Start the Tailscale join script inside the container (backgrounded - approval can take a while)
+    - name: Start the Tailscale join script inside the container as a transient systemd unit
+      # nohup/disown don't reliably survive `pct exec` (lxc-attach) ending its session -
+      # the container runtime can clean up the whole process scope tied to that exec
+      # call regardless. systemd-run hands the process to PID 1 instead, which is
+      # independent of this exec session and can't be killed by it.
       ansible.builtin.command: >-
-        pct exec {{ ctid }} -- bash -c "nohup /root/tailscale-join.sh </dev/null >/var/log/tailscale-join-wrapper.log 2>&1 & disown"
+        pct exec {{ ctid }} -- systemd-run --unit=tailscale-join --collect --no-block /root/tailscale-join.sh
       changed_when: true
       no_log: true
 
