@@ -98,6 +98,20 @@
       ansible.builtin.set_fact:
         ctid: "{{ nextid.stdout | trim }}"
 
+    - name: Ensure the tun kernel module is loaded on the Proxmox host
+      # Required for Tailscale (or any VPN/WireGuard tool) to work inside an
+      # unprivileged LXC container - containers share the host kernel and
+      # can't load modules themselves, so this has to happen on the host.
+      ansible.builtin.command: modprobe tun
+      changed_when: false
+
+    - name: Persist the tun module across Proxmox host reboots
+      ansible.builtin.lineinfile:
+        path: /etc/modules-load.d/tun.conf
+        line: "tun"
+        create: true
+        mode: "0644"
+
     - name: Create the LXC container
       ansible.builtin.command: >-
         pct create {{ ctid }} {{ lxc_template_volid }}
@@ -111,6 +125,17 @@
         --features nesting=1
       args:
         creates: "/etc/pve/lxc/{{ ctid }}.conf"
+
+    - name: Allow TUN/TAP device access inside the (unprivileged) container for Tailscale
+      # --features nesting=1 alone isn't enough - /dev/net/tun has to be
+      # explicitly passed through, which isn't exposed as a `pct create
+      # --features` flag, only via raw lxc.* config lines.
+      ansible.builtin.blockinfile:
+        path: "/etc/pve/lxc/{{ ctid }}.conf"
+        marker: "# {mark} ANSIBLE MANAGED - TUN device passthrough for Tailscale"
+        block: |
+          lxc.cgroup2.devices.allow: c 10:200 rwm
+          lxc.mount.entry: /dev/net/tun dev/net/tun none bind,create=file
 
     - name: Start the container
       ansible.builtin.command: pct start {{ ctid }}
