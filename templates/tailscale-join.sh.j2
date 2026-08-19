@@ -21,42 +21,27 @@ TS_AUTHKEY="{{ tailscale_authkey | trim }}"
 
 echo "[$(date -Is)] Starting Tailscale as $TS_HOSTNAME with tags $TS_TAGS..."
 
-# A side-by-side comparison against a manual run that worked showed the only
-# difference was `sudo` - Ubuntu's default sudoers has `Defaults use_pty`,
-# which allocates a real pty for whatever it runs, even with no parent
-# terminal at all (unlike running the command directly as root).
-sudo tailscale up \
+# Run in the foreground (no backgrounding) with sudo's pty, matching the exact
+# manual invocation that worked - backgrounding a command in a non-interactive
+# script silently redirects its stdin to /dev/null, which the manual run never
+# had. `timeout` bounds it so an unapproved device doesn't hang this unit
+# forever, without reintroducing our own polling loop on top of it.
+timeout 1800 sudo tailscale up \
     --auth-key="$TS_AUTHKEY" \
     --hostname="$TS_HOSTNAME" \
     --advertise-tags="$TS_TAGS" \
     --ssh \
     --accept-dns=true \
     --accept-risk=lose-ssh \
-    --reset \
-    >/var/log/tailscale-up.log 2>&1 &
+    --reset || true
 
-TS_UP_PID=$!
 unset TS_AUTHKEY
 
-echo "[$(date -Is)] Waiting for Tailscale approval..."
-
-CONNECTED=false
-for i in {1..360}; do
-    if tailscale ip >/dev/null 2>&1; then
-        CONNECTED=true
-        break
-    fi
-    echo "[$(date -Is)] Waiting for approval..."
-    sleep 5
-done
-
-wait "$TS_UP_PID" || true
-
-if [ "$CONNECTED" = true ]; then
+if tailscale ip >/dev/null 2>&1; then
     echo "[$(date -Is)] Connected."
     tailscale ip
 else
-    echo "[$(date -Is)] ERROR: Timed out waiting for Tailscale approval."
+    echo "[$(date -Is)] ERROR: tailscale up did not complete successfully (timed out or failed)."
     tailscale status || true
     exit 1
 fi
