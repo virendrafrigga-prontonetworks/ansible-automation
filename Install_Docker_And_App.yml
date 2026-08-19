@@ -4,10 +4,12 @@
   gather_facts: false
   vars:
     target_host: "dev-vm01"          # From AWX Survey - the VM's tailnet hostname (vm_name from Playbook 1)
+    vm_user: "pronto"                 # From AWX Survey - must match the vm_user used to provision this VM
   tasks:
     - name: Add target VM to in-memory inventory
       ansible.builtin.add_host:
         name: "{{ target_host }}"
+        ansible_user: "{{ vm_user }}"
         groups: docker_target
 
 - name: Install Docker, Compose and Traefik, then deploy the chosen app
