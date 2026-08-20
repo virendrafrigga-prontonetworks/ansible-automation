@@ -32,13 +32,15 @@ rm -f "$ERR_FILE"
 
 if [ "$APPROVED" != true ]; then
     echo "[$(date -Is)] ERROR: still not approved after 24 hours - giving up. Once approved, run manually:"
-    echo "  tailscale serve --bg $EXPOSE_PORT && tailscale funnel 443 on"
+    echo "  tailscale serve --bg $EXPOSE_PORT && tailscale funnel --bg $EXPOSE_PORT"
     exit 1
 fi
 
 echo "[$(date -Is)] Approved - Tailscale Serve configured for port $EXPOSE_PORT."
 
-if ! tailscale funnel 443 on; then
+# 'tailscale funnel <port> on' is the old, removed CLI syntax (tailscale 1.52+
+# unified serve/funnel to take the local port directly, same as 'serve --bg').
+if ! tailscale funnel --bg "$EXPOSE_PORT"; then
     echo "[$(date -Is)] ERROR: tailscale funnel failed."
     exit 1
 fi
