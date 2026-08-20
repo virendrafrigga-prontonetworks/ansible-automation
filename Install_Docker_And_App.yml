@@ -111,21 +111,26 @@
       # requires the node to already be approved/connected on the tailnet.
       when: expose_to_internet | bool
       block:
-        - name: Check whether this node is approved and connected on the tailnet
-          ansible.builtin.command: tailscale status --json
-          register: ts_status
-          changed_when: false
+        - name: Attempt to configure Tailscale Serve for the local app port
+          # Checked by trying the real command rather than pre-parsing
+          # 'tailscale status --json' - tailscaled's own "not yet approved"
+          # error text is the one reliable signal for this state.
+          ansible.builtin.command: tailscale serve --bg {{ expose_port }}
+          register: ts_serve
+          changed_when: ts_serve.rc == 0
+          failed_when: false
 
         - name: Stop here if this node isn't approved yet
           ansible.builtin.fail:
             msg: >-
               {{ target_host }} is not yet approved on the tailnet - approve it in the Tailscale admin
               console (Machines page), then re-run this job with expose_to_internet=true.
-          when: not ((ts_status.stdout | from_json).Self.MachineAuthorized | default(true))
+          when: ts_serve.rc != 0 and 'not yet approved' in ts_serve.stderr
 
-        - name: Configure Tailscale Serve for the local app port
-          ansible.builtin.command: tailscale serve --bg {{ expose_port }}
-          changed_when: true
+        - name: Fail on any other Tailscale Serve error
+          ansible.builtin.fail:
+            msg: "tailscale serve failed: {{ ts_serve.stderr }}"
+          when: ts_serve.rc != 0 and 'not yet approved' not in ts_serve.stderr
 
         - name: Enable Tailscale Funnel to make it publicly reachable
           ansible.builtin.command: tailscale funnel 443 on

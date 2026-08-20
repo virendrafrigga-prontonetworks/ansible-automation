@@ -25,25 +25,28 @@
     expose_port: 80                  # From AWX Survey
 
   tasks:
-    - name: Check whether this node is approved and connected on the tailnet
+    - name: Attempt to configure Tailscale Serve for the local port
       # Device approval is a manual, external step in the Tailscale admin
       # console and can take a while - Funnel simply cannot work until it's
-      # done. Check for it explicitly and fail with a clear message rather
-      # than let 'tailscale funnel' fail with a cryptic error.
-      ansible.builtin.command: tailscale status --json
-      register: ts_status
-      changed_when: false
+      # done. Checked by trying the real command rather than pre-parsing
+      # 'tailscale status --json' - tailscaled's own "not yet approved"
+      # error text is the one reliable signal for this state.
+      ansible.builtin.command: tailscale serve --bg {{ expose_port }}
+      register: ts_serve
+      changed_when: ts_serve.rc == 0
+      failed_when: false
 
     - name: Stop here if this node isn't approved yet
       ansible.builtin.fail:
         msg: >-
           {{ target_host }} is not yet approved on the tailnet - approve it in the Tailscale admin
           console (Machines page), then re-run this job. Funnel cannot be enabled on an unapproved node.
-      when: not ((ts_status.stdout | from_json).Self.MachineAuthorized | default(true))
+      when: ts_serve.rc != 0 and 'not yet approved' in ts_serve.stderr
 
-    - name: Configure Tailscale Serve for the local port
-      ansible.builtin.command: tailscale serve --bg {{ expose_port }}
-      changed_when: true
+    - name: Fail on any other Tailscale Serve error
+      ansible.builtin.fail:
+        msg: "tailscale serve failed: {{ ts_serve.stderr }}"
+      when: ts_serve.rc != 0 and 'not yet approved' not in ts_serve.stderr
 
     - name: Enable Tailscale Funnel to make it publicly reachable
       ansible.builtin.command: tailscale funnel 443 on
