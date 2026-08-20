@@ -1,0 +1,46 @@
+#!/bin/bash
+# Waits for this node's tailnet admin approval, then enables Tailscale Funnel
+# for the given port. Runs detached (systemd-run --collect --no-block) so it
+# survives independently of whatever kicked it off - approval can take
+# anywhere from seconds to days, and nothing should have to wait for it.
+set -uo pipefail
+
+LOGFILE="/var/log/tailscale-funnel.log"
+exec > >(tee -a "$LOGFILE") 2>&1
+
+EXPOSE_PORT="{{ expose_port }}"
+ERR_FILE="$(mktemp)"
+
+echo "[$(date -Is)] Waiting for tailnet admin approval before enabling Funnel on port $EXPOSE_PORT..."
+
+APPROVED=false
+for i in {1..2880}; do
+    if tailscale serve --bg "$EXPOSE_PORT" 2>"$ERR_FILE"; then
+        APPROVED=true
+        break
+    fi
+    if grep -q "not yet approved" "$ERR_FILE"; then
+        sleep 30
+        continue
+    fi
+    echo "[$(date -Is)] ERROR: tailscale serve failed for a reason other than pending approval:"
+    cat "$ERR_FILE"
+    rm -f "$ERR_FILE"
+    exit 1
+done
+rm -f "$ERR_FILE"
+
+if [ "$APPROVED" != true ]; then
+    echo "[$(date -Is)] ERROR: still not approved after 24 hours - giving up. Once approved, run manually:"
+    echo "  tailscale serve --bg $EXPOSE_PORT && tailscale funnel 443 on"
+    exit 1
+fi
+
+echo "[$(date -Is)] Approved - Tailscale Serve configured for port $EXPOSE_PORT."
+
+if ! tailscale funnel 443 on; then
+    echo "[$(date -Is)] ERROR: tailscale funnel failed."
+    exit 1
+fi
+
+echo "[$(date -Is)] Funnel enabled - reachable at https://{{ tailscale_hostname }}.<your-tailnet>.ts.net"
