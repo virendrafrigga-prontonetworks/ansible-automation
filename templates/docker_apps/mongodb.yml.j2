@@ -1,0 +1,22 @@
+version: "3.8"
+
+# MongoDB speaks a raw TCP protocol, not HTTP - there's no "path" to route
+# on, and it must never be reachable from the public internet without auth
+# configured. No 'web' network, no Traefik labels, no published host port.
+# Other app containers on this same VM reach it by container name and port
+# ("mongodb:27017") over the shared 'internal' network only.
+networks:
+  internal:
+    external: true
+
+volumes:
+  mongo_data:
+
+services:
+  mongodb:
+    image: mongo:latest
+    restart: unless-stopped
+    volumes:
+      - mongo_data:/data/db
+    networks:
+      - internal

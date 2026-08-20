@@ -12,18 +12,29 @@
         ansible_user: "{{ vm_user }}"
         groups: docker_target
 
-- name: Install Docker, Compose and Traefik, then deploy the chosen app
+- name: Install Docker, Compose and Traefik, then deploy the chosen apps
   hosts: docker_target
   become: true
   gather_facts: true
 
+  vars_files:
+    - vars/docker_apps.yml
+
   vars:
-    app_choice: "nginx"                       # From AWX Survey - nginx | wordpress | portainer
-    app_hostname: "{{ target_host }}"          # From AWX Survey - Host() the app should answer to behind Traefik
-    wordpress_db_password: ""                  # From AWX Survey/Vault - required when app_choice == wordpress
+    # From AWX Survey - one VM can run several containers side by side,
+    # routed by path behind the single Traefik instance/Funnel URL. Each
+    # entry: {name: <docker_app_catalog key>, path_prefix: "/something"}.
+    # path_prefix is ignored for apps with expose_http: false (redis,
+    # mongodb) - those are never routed by Traefik at all, only reachable
+    # from other containers on this VM over the internal network.
+    docker_apps:
+      - name: nginx
+        path_prefix: "/"
+    app_hostname: "{{ target_host }}"          # From AWX Survey - Host() the apps should answer to behind Traefik
+    wordpress_db_password: ""                  # From AWX Survey/Vault - required when wordpress is in docker_apps
     # Private by default - only expose to the real internet if explicitly asked.
-    # Everything here goes through Traefik on 80, regardless of app_choice, so
-    # this doesn't need to vary per-app the way LXC's expose_port might.
+    # Everything here goes through Traefik on 80/443, so this doesn't need to
+    # vary per-app the way LXC's expose_port might.
     expose_to_internet: false                  # From AWX Survey
     expose_port: 80                            # From AWX Survey - Traefik's own port
 
@@ -59,6 +70,20 @@
       ansible.builtin.command: docker network create web
       when: web_network_check.rc != 0
 
+    - name: Check whether the shared 'internal' Docker network exists
+      # Private, never published, never routed by Traefik - lets apps reach
+      # a database container on this same VM (e.g. "redis:6379") without
+      # that database ever being reachable from the 'web' network or the
+      # public Funnel URL.
+      ansible.builtin.command: docker network inspect internal
+      register: internal_network_check
+      changed_when: false
+      failed_when: false
+
+    - name: Create shared 'internal' Docker network for inter-container access
+      ansible.builtin.command: docker network create internal
+      when: internal_network_check.rc != 0
+
     - name: Deploy Traefik reverse proxy
       block:
         - name: Ensure Traefik directory exists
@@ -79,37 +104,23 @@
             chdir: /opt/traefik
           changed_when: true
 
-    - name: Deploy the selected application
-      block:
-        - name: Ensure app directory exists
-          ansible.builtin.file:
-            path: "/opt/{{ app_choice }}"
-            state: directory
-            mode: "0755"
-
-        - name: Template app compose file
-          ansible.builtin.template:
-            src: "docker_apps/{{ app_choice }}.yml.j2"
-            dest: "/opt/{{ app_choice }}/docker-compose.yml"
-            mode: "0644"
-          no_log: "{{ app_choice == 'wordpress' }}"
-
-        - name: Start the application
-          ansible.builtin.command: docker compose up -d
-          args:
-            chdir: "/opt/{{ app_choice }}"
-          changed_when: true
+    - name: Deploy each requested app
+      ansible.builtin.include_tasks: install_docker_app_block.yml
+      loop: "{{ docker_apps }}"
+      loop_control:
+        loop_var: docker_app
 
     - name: Mark this node as a Tailscale docker-host (per team tag scheme)
       ansible.builtin.command: tailscale set --advertise-tags=tag:vm-provisioned,tag:docker-host
       changed_when: true
       # Requires your tailnet ACL's tagOwners to permit this node re-tagging itself as tag:docker-host.
 
-    - name: Expose this app to the public internet via Tailscale Funnel
+    - name: Expose this VM to the public internet via Tailscale Funnel
       # Private by default. Only runs when explicitly requested. Approval can
       # take anywhere from seconds to days, so this doesn't wait or fail on
       # it here - it hands off to a detached script running inside the VM
-      # that polls until approved, then enables Funnel on its own.
+      # that polls until approved, then enables Funnel on its own. One Funnel
+      # endpoint covers every HTTP app deployed above, path-routed by Traefik.
       when: expose_to_internet | bool
       block:
         - name: Render the Tailscale Funnel enable script content
@@ -132,8 +143,8 @@
     - name: Show access instructions
       ansible.builtin.debug:
         msg: >-
-          Docker app '{{ app_choice }}' deployed on {{ target_host }}, routed through Traefik on ports 80/443
-          for Host(`{{ app_hostname }}`).
+          Deployed on {{ target_host }} behind Traefik (Host `{{ app_hostname }}`, ports 80/443):
+          {% for a in docker_apps %}{{ a.name }}{{ ' at path ' ~ a.path_prefix if docker_app_catalog[a.name].expose_http else ' (internal-only, no path/Funnel access)' }}{{ ', ' if not loop.last else '' }}{% endfor %}.
           {{ ('A background script on ' ~ target_host ~ ' is waiting for tailnet admin approval, then will expose it '
               ~ 'at https://' ~ target_host ~ '.<your-tailnet>.ts.net - check /var/log/tailscale-funnel.log there for status.')
              if (expose_to_internet | bool)

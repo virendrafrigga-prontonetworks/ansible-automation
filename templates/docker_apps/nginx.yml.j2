@@ -3,6 +3,8 @@ version: "3.8"
 networks:
   web:
     external: true
+  internal:
+    external: true
 
 services:
   nginx:
@@ -10,7 +12,17 @@ services:
     restart: unless-stopped
     networks:
       - web
+      - internal
     labels:
       - "traefik.enable=true"
+{% if path_prefix == '/' %}
+      # Root app: plain Host rule, no PathPrefix/stripPrefix - Traefik gives
+      # this lower priority than any other app's more specific PathPrefix
+      # rule automatically, so it acts as the catch-all/homepage.
       - "traefik.http.routers.nginx.rule=Host(`{{ app_hostname }}`)"
+{% else %}
+      - "traefik.http.routers.nginx.rule=Host(`{{ app_hostname }}`) && PathPrefix(`{{ path_prefix }}`)"
+      - "traefik.http.middlewares.nginx-stripprefix.stripprefix.prefixes={{ path_prefix }}"
+      - "traefik.http.routers.nginx.middlewares=nginx-stripprefix"
+{% endif %}
       - "traefik.http.services.nginx.loadbalancer.server.port=80"

@@ -1,0 +1,24 @@
+# Included (not run directly) with docker_app (loop var: {name, path_prefix}),
+# docker_app_catalog, app_hostname, wordpress_db_password already set by the
+# caller.
+
+- name: Ensure app directory exists for {{ docker_app.name }}
+  ansible.builtin.file:
+    path: "/opt/{{ docker_app.name }}"
+    state: directory
+    mode: "0755"
+
+- name: Template compose file for {{ docker_app.name }}
+  ansible.builtin.template:
+    src: "docker_apps/{{ docker_app.name }}.yml.j2"
+    dest: "/opt/{{ docker_app.name }}/docker-compose.yml"
+    mode: "0644"
+  vars:
+    path_prefix: "{{ docker_app.path_prefix | default('/') }}"
+  no_log: "{{ docker_app.name == 'wordpress' }}"
+
+- name: Start {{ docker_app.name }}
+  ansible.builtin.command: docker compose up -d
+  args:
+    chdir: "/opt/{{ docker_app.name }}"
+  changed_when: true

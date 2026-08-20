@@ -3,6 +3,8 @@ version: "3.8"
 networks:
   web:
     external: true
+  internal:
+    external: true
 
 volumes:
   portainer_data:
@@ -16,7 +18,14 @@ services:
       - portainer_data:/data
     networks:
       - web
+      - internal
     labels:
       - "traefik.enable=true"
+{% if path_prefix == '/' %}
       - "traefik.http.routers.portainer.rule=Host(`{{ app_hostname }}`)"
+{% else %}
+      - "traefik.http.routers.portainer.rule=Host(`{{ app_hostname }}`) && PathPrefix(`{{ path_prefix }}`)"
+      - "traefik.http.middlewares.portainer-stripprefix.stripprefix.prefixes={{ path_prefix }}"
+      - "traefik.http.routers.portainer.middlewares=portainer-stripprefix"
+{% endif %}
       - "traefik.http.services.portainer.loadbalancer.server.port=9000"

@@ -1,0 +1,33 @@
+---
+# Catalog of Docker apps deployable via Install_Docker_And_App.yml. Each key
+# needs a matching templates/docker_apps/<key>.yml.j2 compose template.
+#
+# expose_http controls routing entirely:
+#   true  - gets a Traefik label-based router (Host + PathPrefix) on the
+#           shared 'web' network, reachable through the VM's public Funnel URL.
+#   false - raw TCP protocol (no HTTP path concept) or just not meant to be
+#           public - joins only the private 'internal' network, no Traefik
+#           labels, no host-published port. Reachable by other containers on
+#           this VM by container name (e.g. "redis:6379"), never externally.
+#           Never flip this to true for a database.
+docker_app_catalog:
+  nginx:
+    image: "nginx:latest"
+    port: 80
+    expose_http: true
+  wordpress:
+    image: "wordpress:latest"
+    port: 80
+    expose_http: true
+  portainer:
+    image: "portainer/portainer-ce:latest"
+    port: 9000
+    expose_http: true
+  redis:
+    image: "redis:latest"
+    port: 6379
+    expose_http: false
+  mongodb:
+    image: "mongo:latest"
+    port: 27017
+    expose_http: false

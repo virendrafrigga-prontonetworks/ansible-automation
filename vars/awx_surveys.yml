@@ -51,26 +51,29 @@ provision_vm_survey:
 install_docker_app_survey:
   name: ""
   description: ""
+  # 'docker_apps' (a list of {name, path_prefix} objects - see
+  # vars/docker_apps.yml for the catalog of names) doesn't fit AWX Survey's
+  # flat field types (text/password/multiplechoice/integer). Set it directly
+  # in the Job Template's "Variables" field as YAML instead, e.g.:
+  #   docker_apps:
+  #     - name: nginx
+  #       path_prefix: "/"
+  #     - name: redis
+  # (path_prefix is ignored for apps with expose_http: false, like redis/mongodb)
   spec:
     - question_name: "Target Host"
       question_description: "Tailnet hostname of the VM from the Provision VM job (vm_name)"
       type: text
       variable: target_host
       required: true
-    - question_name: "App Choice"
-      type: multiplechoice
-      variable: app_choice
-      required: true
-      choices: "nginx\nwordpress\nportainer"
-      default: "nginx"
     - question_name: "App Hostname"
-      question_description: "Host() Traefik should route for this app - defaults to target_host if left blank"
+      question_description: "Host() Traefik should route for these apps - defaults to target_host if left blank"
       type: text
       variable: app_hostname
       required: false
       default: ""
     - question_name: "WordPress DB Password"
-      question_description: "Only used when App Choice = wordpress"
+      question_description: "Only used when wordpress is one of the docker_apps"
       type: password
       variable: wordpress_db_password
       required: false
@@ -96,6 +99,46 @@ expose_app_to_internet_survey:
       variable: expose_port
       required: false
       default: 80
+
+delete_vm_survey:
+  name: ""
+  description: ""
+  spec:
+    - question_name: "VM Name"
+      question_description: "The VM to delete, by name (as passed to vm_name when it was created)"
+      type: text
+      variable: vm_name
+      required: true
+
+delete_lxc_survey:
+  name: ""
+  description: ""
+  spec:
+    - question_name: "Container Name"
+      question_description: "The LXC container to delete, by name (as passed to ct_name when it was created)"
+      type: text
+      variable: ct_name
+      required: true
+
+delete_docker_app_survey:
+  name: ""
+  description: ""
+  spec:
+    - question_name: "Target Host"
+      question_description: "Tailnet hostname of the VM the app is running on"
+      type: text
+      variable: target_host
+      required: true
+    - question_name: "VM User"
+      type: text
+      variable: vm_user
+      required: false
+      default: "pronto"
+    - question_name: "App Name"
+      question_description: "The docker_apps entry name to remove (its /opt/<app_name> directory) - Traefik and other apps on the same VM are untouched"
+      type: text
+      variable: app_name
+      required: true
 
 create_lxc_app_survey:
   name: ""

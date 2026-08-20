@@ -3,6 +3,8 @@ version: "3.8"
 networks:
   web:
     external: true
+  internal:
+    external: true
 
 volumes:
   wp_db_data:
@@ -19,6 +21,8 @@ services:
       MYSQL_RANDOM_ROOT_PASSWORD: "yes"
     volumes:
       - wp_db_data:/var/lib/mysql
+    networks:
+      - internal
 
   wordpress:
     image: wordpress:latest
@@ -34,7 +38,14 @@ services:
       - wp_data:/var/www/html
     networks:
       - web
+      - internal
     labels:
       - "traefik.enable=true"
+{% if path_prefix == '/' %}
       - "traefik.http.routers.wordpress.rule=Host(`{{ app_hostname }}`)"
+{% else %}
+      - "traefik.http.routers.wordpress.rule=Host(`{{ app_hostname }}`) && PathPrefix(`{{ path_prefix }}`)"
+      - "traefik.http.middlewares.wordpress-stripprefix.stripprefix.prefixes={{ path_prefix }}"
+      - "traefik.http.routers.wordpress.middlewares=wordpress-stripprefix"
+{% endif %}
       - "traefik.http.services.wordpress.loadbalancer.server.port=80"

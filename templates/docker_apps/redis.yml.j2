@@ -1,0 +1,17 @@
+version: "3.8"
+
+# Redis speaks a raw TCP protocol, not HTTP - there's no "path" to route on,
+# and it must never be reachable from the public internet (no auth by
+# default). No 'web' network, no Traefik labels, no published host port.
+# Other app containers on this same VM reach it by container name and port
+# ("redis:6379") over the shared 'internal' network only.
+networks:
+  internal:
+    external: true
+
+services:
+  redis:
+    image: redis:latest
+    restart: unless-stopped
+    networks:
+      - internal

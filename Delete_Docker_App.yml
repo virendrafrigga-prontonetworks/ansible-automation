@@ -1,0 +1,52 @@
+---
+- name: Register the target VM for this run
+  hosts: localhost
+  gather_facts: false
+  vars:
+    target_host: "dev-vm01"          # From AWX Survey - the VM's tailnet hostname
+    vm_user: "pronto"                 # From AWX Survey - must match the vm_user used to provision this VM
+  tasks:
+    - name: Add target VM to in-memory inventory
+      ansible.builtin.add_host:
+        name: "{{ target_host }}"
+        ansible_user: "{{ vm_user }}"
+        groups: docker_target
+
+- name: Delete one Docker app from this VM, leaving Traefik and other apps untouched
+  hosts: docker_target
+  become: true
+  gather_facts: false
+
+  vars:
+    app_name: "nginx"          # From AWX Survey - the docker_apps entry name to remove (its /opt/<app_name> directory)
+
+  tasks:
+    - name: Check whether this app's directory exists
+      ansible.builtin.stat:
+        path: "/opt/{{ app_name }}"
+      register: app_dir
+
+    - name: Report and stop here if this app isn't deployed
+      when: not app_dir.stat.exists
+      ansible.builtin.debug:
+        msg: "No app named '{{ app_name }}' found at /opt/{{ app_name }} on {{ target_host }} - nothing to delete."
+
+    - name: Tear down and remove the app
+      when: app_dir.stat.exists
+      block:
+        - name: Stop and remove the app's containers, networks and volumes
+          ansible.builtin.command: docker compose down --volumes
+          args:
+            chdir: "/opt/{{ app_name }}"
+          changed_when: true
+
+        - name: Remove the app's directory
+          ansible.builtin.file:
+            path: "/opt/{{ app_name }}"
+            state: absent
+
+        - name: Show result
+          ansible.builtin.debug:
+            msg: >-
+              App '{{ app_name }}' removed from {{ target_host }}. Traefik and any other apps on this VM
+              are untouched - re-run Install_Docker_And_App.yml if you want to redeploy it.
