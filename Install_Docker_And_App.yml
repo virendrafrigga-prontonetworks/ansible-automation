@@ -21,6 +21,11 @@
     app_choice: "nginx"                       # From AWX Survey - nginx | wordpress | portainer
     app_hostname: "{{ target_host }}"          # From AWX Survey - Host() the app should answer to behind Traefik
     wordpress_db_password: ""                  # From AWX Survey/Vault - required when app_choice == wordpress
+    # Private by default - only expose to the real internet if explicitly asked.
+    # Everything here goes through Traefik on 80, regardless of app_choice, so
+    # this doesn't need to vary per-app the way LXC's expose_port might.
+    expose_to_internet: false                  # From AWX Survey
+    expose_port: 80                            # From AWX Survey - Traefik's own port
 
   tasks:
     - name: Check if Docker is already installed
@@ -122,9 +127,28 @@
       changed_when: true
       # Requires your tailnet ACL's tagOwners to permit this node re-tagging itself as tag:docker-host.
 
+    - name: Expose this app to the public internet via Tailscale Funnel
+      # Private by default. Only runs when explicitly requested - requires the
+      # ACL's nodeAttrs to grant "funnel" to this node's tag beforehand, and
+      # requires the node to already be approved/connected (best-effort: if it
+      # isn't yet, re-run these two commands by hand once it is).
+      when: expose_to_internet | bool
+      block:
+        - name: Configure Tailscale Serve for the local app port
+          ansible.builtin.command: tailscale serve --bg {{ expose_port }}
+          changed_when: true
+
+        - name: Enable Tailscale Funnel to make it publicly reachable
+          ansible.builtin.command: tailscale funnel 443 on
+          changed_when: true
+      ignore_errors: true
+
     - name: Show access instructions
       ansible.builtin.debug:
         msg: >-
           Docker app '{{ app_choice }}' deployed on {{ target_host }}, routed through Traefik on ports 80/443
-          for Host(`{{ app_hostname }}`). Traefik is already reachable now over the tailnet; to reach it from the
-          normal internet, forward ports 80/443 on your edge router to this VM's LAN IP (manual step, outside Ansible).
+          for Host(`{{ app_hostname }}`).
+          {{ ('Exposed to the public internet via Tailscale Funnel at https://' ~ target_host ~ '.<your-tailnet>.ts.net')
+             if (expose_to_internet | bool)
+             else ('Private - reachable only over the tailnet at ' ~ target_host ~ ' (or its tailnet IP).'
+                   ~ ' Re-run this job with expose_to_internet=true if you want it public.') }}

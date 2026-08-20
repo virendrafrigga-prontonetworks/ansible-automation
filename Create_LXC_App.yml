@@ -32,6 +32,12 @@
     # with a matching tag:lxc-host - adjust if you want a different name.
     tailscale_tag: "tag:lxc-host"
 
+    # Private by default - only expose to the real internet if explicitly asked.
+    # nginx listens on 80 by default; adjust expose_port if app_choice ever
+    # grows to something listening elsewhere.
+    expose_to_internet: false                # From AWX Survey
+    expose_port: 80                          # From AWX Survey
+
   tasks:
     - name: List LXC templates already present on this storage
       ansible.builtin.command: pveam list {{ template_storage }}
@@ -193,6 +199,22 @@
       register: lxc_tailnet_reachability
       ignore_errors: true
 
+    - name: Expose this app to the public internet via Tailscale Funnel
+      # Private by default. Only runs when explicitly requested - requires the
+      # ACL's nodeAttrs to grant "funnel" to this node's tag beforehand, and
+      # requires the node to already be approved/connected (best-effort: if it
+      # isn't yet, re-run these two commands by hand once it is).
+      when: expose_to_internet | bool
+      block:
+        - name: Configure Tailscale Serve for the local app port
+          ansible.builtin.command: pct exec {{ ctid }} -- tailscale serve --bg {{ expose_port }}
+          changed_when: true
+
+        - name: Enable Tailscale Funnel to make it publicly reachable
+          ansible.builtin.command: pct exec {{ ctid }} -- tailscale funnel 443 on
+          changed_when: true
+      ignore_errors: true
+
     - name: Show access instructions
       ansible.builtin.debug:
         msg: >-
@@ -201,5 +223,7 @@
              if lxc_tailnet_reachability is succeeded
              else 'Not yet confirmed reachable over the tailnet - most likely still pending manual approval in '
                   ~ 'your Tailscale admin console. Approve it there; no need to re-run this job once approved.' }}
-          To reach the app from the normal internet, forward ports 80/443 on your edge router to this
-          container's LAN IP (manual step, outside Ansible).
+          {{ ('Exposed to the public internet via Tailscale Funnel at https://' ~ ct_name ~ '.<your-tailnet>.ts.net')
+             if (expose_to_internet | bool)
+             else ('Private - reachable only over the tailnet at ' ~ ct_name ~ ' (or its tailnet IP).'
+                   ~ ' Re-run this job with expose_to_internet=true if you want it public.') }}
