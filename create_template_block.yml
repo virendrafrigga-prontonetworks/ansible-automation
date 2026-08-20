@@ -76,11 +76,20 @@
         template_id: "{{ nextid.stdout | trim }}"
 
     - name: Create VM shell for the template
+      # --cpu matters: Proxmox's default (kvm64) is a very old, generic CPU
+      # model that doesn't expose the instruction set (x86-64-v2: SSE4.2,
+      # POPCNT, CMPXCHG16B, etc.) that RHEL 9-family kernels (CentOS Stream 9,
+      # Rocky 9, AlmaLinux 9) require at boot. Under kvm64 they hang very early
+      # with no console output and no networking - silent boot, CPU stuck
+      # HLT-looping at a fixed instruction, high host CPU from constant
+      # VM-exit/re-entry. Ubuntu/Debian tolerate kvm64 fine, which is why only
+      # the RHEL-family templates showed this symptom.
       ansible.builtin.command: >-
         qm create {{ template_id }}
         --name {{ template_name }}
         --memory {{ memory }}
         --cores {{ cores }}
+        --cpu x86-64-v2-AES
         --net0 virtio,bridge={{ bridge }}
       args:
         creates: "/etc/pve/qemu-server/{{ template_id }}.conf"
