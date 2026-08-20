@@ -108,10 +108,21 @@
     - name: Expose this app to the public internet via Tailscale Funnel
       # Private by default. Only runs when explicitly requested - requires the
       # ACL's nodeAttrs to grant "funnel" to this node's tag beforehand, and
-      # requires the node to already be approved/connected (best-effort: if it
-      # isn't yet, re-run these two commands by hand once it is).
+      # requires the node to already be approved/connected on the tailnet.
       when: expose_to_internet | bool
       block:
+        - name: Check whether this node is approved and connected on the tailnet
+          ansible.builtin.command: tailscale status --json
+          register: ts_status
+          changed_when: false
+
+        - name: Stop here if this node isn't approved yet
+          ansible.builtin.fail:
+            msg: >-
+              {{ target_host }} is not yet approved on the tailnet - approve it in the Tailscale admin
+              console (Machines page), then re-run this job with expose_to_internet=true.
+          when: not ((ts_status.stdout | from_json).Self.MachineAuthorized | default(true))
+
         - name: Configure Tailscale Serve for the local app port
           ansible.builtin.command: tailscale serve --bg {{ expose_port }}
           changed_when: true
@@ -119,7 +130,6 @@
         - name: Enable Tailscale Funnel to make it publicly reachable
           ansible.builtin.command: tailscale funnel 443 on
           changed_when: true
-      ignore_errors: true
 
     - name: Show access instructions
       ansible.builtin.debug:

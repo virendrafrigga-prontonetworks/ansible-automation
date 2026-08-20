@@ -1,0 +1,57 @@
+---
+- name: Register the target VM for this run
+  hosts: localhost
+  gather_facts: false
+  vars:
+    target_host: "dev-vm01"          # From AWX Survey - the VM's tailnet hostname (vm_name from Playbook 1)
+    vm_user: "pronto"                 # From AWX Survey - must match the vm_user used to provision this VM
+  tasks:
+    - name: Add target VM to in-memory inventory
+      ansible.builtin.add_host:
+        name: "{{ target_host }}"
+        ansible_user: "{{ vm_user }}"
+        groups: expose_target
+
+- name: Expose an already-running service on this VM to the public internet via Tailscale Funnel
+  hosts: expose_target
+  become: true
+  gather_facts: false
+
+  vars:
+    # Whatever's already listening on this port gets exposed - doesn't matter
+    # whether it was installed via Docker, apt (nginx/apache/anything), or
+    # built by hand. Requires this VM's tailscale node to already be approved
+    # and connected, and the tailnet ACL's nodeAttrs to grant "funnel" to its tag.
+    expose_port: 80                  # From AWX Survey
+
+  tasks:
+    - name: Check whether this node is approved and connected on the tailnet
+      # Device approval is a manual, external step in the Tailscale admin
+      # console and can take a while - Funnel simply cannot work until it's
+      # done. Check for it explicitly and fail with a clear message rather
+      # than let 'tailscale funnel' fail with a cryptic error.
+      ansible.builtin.command: tailscale status --json
+      register: ts_status
+      changed_when: false
+
+    - name: Stop here if this node isn't approved yet
+      ansible.builtin.fail:
+        msg: >-
+          {{ target_host }} is not yet approved on the tailnet - approve it in the Tailscale admin
+          console (Machines page), then re-run this job. Funnel cannot be enabled on an unapproved node.
+      when: not ((ts_status.stdout | from_json).Self.MachineAuthorized | default(true))
+
+    - name: Configure Tailscale Serve for the local port
+      ansible.builtin.command: tailscale serve --bg {{ expose_port }}
+      changed_when: true
+
+    - name: Enable Tailscale Funnel to make it publicly reachable
+      ansible.builtin.command: tailscale funnel 443 on
+      changed_when: true
+
+    - name: Show access instructions
+      ansible.builtin.debug:
+        msg: >-
+          Port {{ expose_port }} on {{ target_host }} is now publicly reachable at
+          https://{{ target_host }}.<your-tailnet>.ts.net - run 'tailscale funnel off' and
+          'tailscale serve --bg off' on {{ target_host }} directly to undo this.

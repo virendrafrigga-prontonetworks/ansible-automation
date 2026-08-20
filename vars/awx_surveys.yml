@@ -76,6 +76,27 @@ install_docker_app_survey:
       required: false
       default: ""
 
+expose_app_to_internet_survey:
+  name: ""
+  description: ""
+  spec:
+    - question_name: "Target Host"
+      question_description: "Tailnet hostname of the VM (vm_name from the Provision VM job)"
+      type: text
+      variable: target_host
+      required: true
+    - question_name: "VM User"
+      type: text
+      variable: vm_user
+      required: false
+      default: "pronto"
+    - question_name: "Port to Expose"
+      question_description: "Local port the already-running service is listening on"
+      type: integer
+      variable: expose_port
+      required: false
+      default: 80
+
 create_lxc_app_survey:
   name: ""
   description: ""
