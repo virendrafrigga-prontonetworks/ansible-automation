@@ -14,7 +14,7 @@
     storage: "local-lvm"                 # From AWX Survey
     bridge: "vmbr0"                       # From AWX Survey
 
-    os_type: "ubuntu-24.04"               # From AWX Survey - any key from vars/os_images.yml (ubuntu-24.04 | ubuntu-22.04 | debian-12 | centos-9-stream | rocky-9 | almalinux-9)
+    os_type: "ubuntu-24.04"               # From AWX Survey - any key from vars/os_images.yml (ubuntu-24.04 | ubuntu-22.04 | debian-12)
 
     vm_name: "dev-vm01"                    # From AWX Survey
     vm_user: "pronto"                      # From AWX Survey - standard automation user, matches post_boot.sh's baremetal convention

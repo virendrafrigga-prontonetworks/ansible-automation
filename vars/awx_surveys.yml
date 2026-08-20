@@ -7,7 +7,7 @@ provision_vm_survey:
       type: multiplechoice
       variable: os_type
       required: true
-      choices: "ubuntu-24.04\nubuntu-22.04\ndebian-12\ncentos-9-stream\nrocky-9\nalmalinux-9"
+      choices: "ubuntu-24.04\nubuntu-22.04\ndebian-12"
       default: "ubuntu-24.04"
     - question_name: "VM Name"
       type: text

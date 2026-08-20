@@ -2,12 +2,13 @@
 # Shared OS catalog for VM cloud-init templates. All entries are genuinely
 # free, anonymously-downloadable cloud images (no registration/subscription) -
 # each publisher's stable "current"/"latest" URL, so these never need manual
-# bumping as new point releases come out. Real RHEL is intentionally excluded:
-# it requires a Red Hat account + subscription-manager registration, a
-# different mechanism than a plain image download. Rocky/AlmaLinux are the
-# free RHEL-compatible options instead. Fedora/openSUSE are intentionally
-# excluded too - their official images are version-pinned, not stable
-# "latest" aliases, so they'd silently go stale without manual upkeep.
+# bumping as new point releases come out.
+#
+# RHEL-family entries (CentOS Stream 9, Rocky 9, AlmaLinux 9) were tried and
+# removed: their cloud images hung at boot under Proxmox's default kvm64 CPU
+# type (confirmed root cause), and separately their cloud-init never applied
+# our custom user-data even once that was worked around - not worth the
+# ongoing maintenance burden for this catalog. Ubuntu/Debian only for now.
 os_image_lookup:
   ubuntu-24.04:
     name: "ubuntu-24.04-template"
@@ -18,12 +19,3 @@ os_image_lookup:
   debian-12:
     name: "debian-12-template"
     url: "https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-genericcloud-amd64.qcow2"
-  centos-9-stream:
-    name: "centos-9-stream-template"
-    url: "https://cloud.centos.org/centos/9-stream/x86_64/images/CentOS-Stream-GenericCloud-9-latest.x86_64.qcow2"
-  rocky-9:
-    name: "rocky-9-template"
-    url: "https://download.rockylinux.org/pub/rocky/9/images/x86_64/Rocky-9-GenericCloud.latest.x86_64.qcow2"
-  almalinux-9:
-    name: "almalinux-9-template"
-    url: "https://repo.almalinux.org/almalinux/9/cloud/x86_64/images/AlmaLinux-9-GenericCloud-latest.x86_64.qcow2"
