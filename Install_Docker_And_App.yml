@@ -116,7 +116,13 @@
         loop_var: docker_app
 
     - name: Mark this node as a Tailscale docker-host (per team tag scheme)
-      ansible.builtin.command: tailscale set --advertise-tags=tag:vm-provisioned,tag:docker-host
+      # 'tailscale set --advertise-tags' doesn't exist in current tailscale
+      # versions - only 'up' (and 'login') accept it. Re-running 'up' on an
+      # already-joined node requires restating its current non-default
+      # settings (hostname, --ssh) alongside the new tags, or it refuses to
+      # apply anything - no auth key needed for this, just a settings update.
+      ansible.builtin.command: >-
+        tailscale up --advertise-tags=tag:vm-provisioned,tag:docker-host --hostname={{ target_host }} --ssh
       changed_when: true
       # Requires your tailnet ACL's tagOwners to permit this node re-tagging itself as tag:docker-host.
 
