@@ -51,15 +51,19 @@ provision_vm_survey:
 install_docker_app_survey:
   name: ""
   description: ""
-  # 'docker_apps' (a list of {name, path_prefix} objects - see
-  # vars/docker_apps.yml for the catalog of names) doesn't fit AWX Survey's
-  # flat field types (text/password/multiplechoice/integer). Set it directly
-  # in the Job Template's "Variables" field as YAML instead, e.g.:
+  # 'docker_apps' (a list of app objects) doesn't fit AWX Survey's flat field
+  # types (text/password/multiplechoice/integer). Set it directly in the Job
+  # Template's "Variables" field as YAML instead, e.g.:
   #   docker_apps:
-  #     - name: nginx
+  #     - name: nginx                 # catalog preset (vars/docker_apps.yml)
   #       path_prefix: "/"
-  #     - name: redis
-  # (path_prefix is ignored for apps with expose_http: false, like redis/mongodb)
+  #     - name: my-app                # custom image, any registry
+  #       image: "myregistry.example.com/my-app:1.2.3"
+  #       port: 3000                  # port the app listens on in its container
+  #       path_prefix: "/myapp"
+  #     - name: redis                 # catalog preset, internal-only, no path needed
+  # (path_prefix is ignored whenever expose_http resolves to false - true by
+  # default for a custom entry unless you set expose_http: false on it)
   spec:
     - question_name: "Target Host"
       question_description: "Tailnet hostname of the VM from the Provision VM job (vm_name)"

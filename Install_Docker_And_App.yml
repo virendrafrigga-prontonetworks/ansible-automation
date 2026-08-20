@@ -23,10 +23,15 @@
   vars:
     # From AWX Survey - one VM can run several containers side by side,
     # routed by path behind the single Traefik instance/Funnel URL. Each
-    # entry: {name: <docker_app_catalog key>, path_prefix: "/something"}.
-    # path_prefix is ignored for apps with expose_http: false (redis,
-    # mongodb) - those are never routed by Traefik at all, only reachable
-    # from other containers on this VM over the internal network.
+    # entry is either:
+    #   - a catalog preset:  {name: <docker_app_catalog key>, path_prefix: "/x"}
+    #   - a custom image:    {name: <anything>, image: "<any registry>/img:tag",
+    #                         port: <container's listening port>, path_prefix: "/x"}
+    # A custom entry's own image/port always win over any catalog lookup.
+    # path_prefix is ignored whenever expose_http resolves to false (either
+    # a catalog preset like redis/mongodb, or a custom entry with
+    # expose_http: false set explicitly) - those never get a Traefik route,
+    # only reachable from other containers on this VM over 'internal'.
     docker_apps:
       - name: nginx
         path_prefix: "/"
@@ -144,7 +149,7 @@
       ansible.builtin.debug:
         msg: >-
           Deployed on {{ target_host }} behind Traefik (Host `{{ app_hostname }}`, ports 80/443):
-          {% for a in docker_apps %}{{ a.name }}{{ ' at path ' ~ a.path_prefix if docker_app_catalog[a.name].expose_http else ' (internal-only, no path/Funnel access)' }}{{ ', ' if not loop.last else '' }}{% endfor %}.
+          {% for a in docker_apps %}{% set is_http = a.expose_http | default(docker_app_catalog[a.name].expose_http if a.name in docker_app_catalog else true) %}{{ a.name }}{{ ' at path ' ~ (a.path_prefix | default('/')) if is_http else ' (internal-only, no path/Funnel access)' }}{{ ', ' if not loop.last else '' }}{% endfor %}.
           {{ ('A background script on ' ~ target_host ~ ' is waiting for tailnet admin approval, then will expose it '
               ~ 'at https://' ~ target_host ~ '.<your-tailnet>.ts.net - check /var/log/tailscale-funnel.log there for status.')
              if (expose_to_internet | bool)

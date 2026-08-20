@@ -1,0 +1,34 @@
+version: "3.8"
+
+# Generic single-container template for any custom image not in the curated
+# catalog (vars/docker_apps.yml) - a developer's own app from Docker Hub or
+# any other registry. Driven entirely by app_image/app_port/expose_http,
+# passed in from the docker_apps entry itself rather than a fixed preset.
+
+networks:
+  web:
+    external: true
+  internal:
+    external: true
+
+services:
+  {{ app_name }}:
+    image: "{{ app_image }}"
+    restart: unless-stopped
+    networks:
+{% if expose_http %}
+      - web
+{% endif %}
+      - internal
+{% if expose_http %}
+    labels:
+      - "traefik.enable=true"
+{% if path_prefix == '/' %}
+      - "traefik.http.routers.{{ app_name }}.rule=Host(`{{ app_hostname }}`)"
+{% else %}
+      - "traefik.http.routers.{{ app_name }}.rule=Host(`{{ app_hostname }}`) && PathPrefix(`{{ path_prefix }}`)"
+      - "traefik.http.middlewares.{{ app_name }}-stripprefix.stripprefix.prefixes={{ path_prefix }}"
+      - "traefik.http.routers.{{ app_name }}.middlewares={{ app_name }}-stripprefix"
+{% endif %}
+      - "traefik.http.services.{{ app_name }}.loadbalancer.server.port={{ app_port }}"
+{% endif %}
