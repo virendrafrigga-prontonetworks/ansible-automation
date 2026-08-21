@@ -144,7 +144,7 @@
       ansible.builtin.include_tasks: install_docker_app_block.yml
       loop: "{{ docker_apps }}"
       loop_control:
-        loop_var: docker_app
+        loop_var: current_docker_app
 
     - name: Expose any app with tcp_funnel_port set outside the tailnet
       # Generic - works for any docker_apps entry, not just a specific name.
@@ -153,7 +153,7 @@
       ansible.builtin.include_tasks: expose_tcp_funnel_block.yml
       loop: "{{ docker_apps | selectattr('tcp_funnel_port', 'defined') | list }}"
       loop_control:
-        loop_var: docker_app
+        loop_var: current_docker_app
 
     - name: Expose HTTP apps to the public internet via Tailscale Funnel
       # Private by default. Only runs when explicitly requested. Approval can

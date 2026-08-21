@@ -1,28 +1,28 @@
-# Included (not run directly) with docker_app (loop var - needs tcp_funnel_port
+# Included (not run directly) with current_docker_app (loop var - needs tcp_funnel_port
 # and either port or a matching docker_app_catalog entry), docker_app_catalog,
 # target_host already set by the caller. Runs once per app that requested TCP
 # Funnel exposure - fully generic, not tied to any specific app name.
 
-- name: Resolve {{ docker_app.name }}'s local port for TCP Funnel
+- name: Resolve {{ current_docker_app.name }}'s local port for TCP Funnel
   ansible.builtin.set_fact:
-    _catalog_entry: "{{ docker_app_catalog[docker_app.name] | default({}) }}"
+    _catalog_entry: "{{ docker_app_catalog[current_docker_app.name] | default({}) }}"
 
-- name: Render the TCP Funnel enable script content for {{ docker_app.name }}
+- name: Render the TCP Funnel enable script content for {{ current_docker_app.name }}
   ansible.builtin.set_fact:
     tcp_funnel_enable_script: "{{ lookup('template', playbook_dir + '/templates/enable-tcp-funnel.sh.j2') }}"
   vars:
     tailscale_hostname: "{{ target_host }}"
-    tcp_funnel_port: "{{ docker_app.tcp_funnel_port }}"
-    local_port: "{{ docker_app.port | default(_catalog_entry.port) }}"
+    tcp_funnel_port: "{{ current_docker_app.tcp_funnel_port }}"
+    local_port: "{{ current_docker_app.port | default(_catalog_entry.port) }}"
 
 - name: Push the TCP Funnel enable script to the VM
   ansible.builtin.copy:
     content: "{{ tcp_funnel_enable_script }}"
-    dest: "/usr/local/bin/enable-tcp-funnel-{{ docker_app.name }}.sh"
+    dest: "/usr/local/bin/enable-tcp-funnel-{{ current_docker_app.name }}.sh"
     mode: "0700"
 
 - name: Start the TCP Funnel enable script as a detached systemd unit
   ansible.builtin.command: >-
-    systemd-run --unit=enable-tcp-funnel-{{ docker_app.name }} --collect --no-block
-    /usr/local/bin/enable-tcp-funnel-{{ docker_app.name }}.sh
+    systemd-run --unit=enable-tcp-funnel-{{ current_docker_app.name }} --collect --no-block
+    /usr/local/bin/enable-tcp-funnel-{{ current_docker_app.name }}.sh
   changed_when: true

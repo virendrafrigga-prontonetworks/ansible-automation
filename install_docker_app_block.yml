@@ -1,54 +1,54 @@
-# Included (not run directly) with docker_app (loop var - see
+# Included (not run directly) with current_docker_app (loop var - see
 # Install_Docker_And_App.yml for the full entry schema: name, and optionally
 # image/port/expose_http/path_prefix/command/environment/volumes/ports/
 # extra_compose/tcp_funnel_port), docker_app_catalog, wordpress_db_password
 # already set by the caller.
 #
-# Every field on a docker_app entry overrides its catalog default (looked up
+# Every field on a current_docker_app entry overrides its catalog default (looked up
 # by name); a name with no matching catalog entry is a fully custom app and
 # must supply its own image/port. wordpress is the one exception - it always
 # uses its own dedicated multi-service template regardless of these fields.
 
-- name: Resolve {{ docker_app.name }}'s catalog defaults, if any
+- name: Resolve {{ current_docker_app.name }}'s catalog defaults, if any
   ansible.builtin.set_fact:
-    _catalog_entry: "{{ docker_app_catalog[docker_app.name] | default({}) }}"
+    _catalog_entry: "{{ docker_app_catalog[current_docker_app.name] | default({}) }}"
 
-- name: Ensure app directory exists for {{ docker_app.name }}
+- name: Ensure app directory exists for {{ current_docker_app.name }}
   ansible.builtin.file:
-    path: "/opt/{{ docker_app.name }}"
+    path: "/opt/{{ current_docker_app.name }}"
     state: directory
     mode: "0755"
 
-- name: Template compose file for {{ docker_app.name }}
+- name: Template compose file for {{ current_docker_app.name }}
   ansible.builtin.template:
-    src: "{{ 'docker_apps/wordpress.yml.j2' if docker_app.name == 'wordpress' else 'docker_apps/generic-app.yml.j2' }}"
-    dest: "/opt/{{ docker_app.name }}/docker-compose.yml"
+    src: "{{ 'docker_apps/wordpress.yml.j2' if current_docker_app.name == 'wordpress' else 'docker_apps/generic-app.yml.j2' }}"
+    dest: "/opt/{{ current_docker_app.name }}/docker-compose.yml"
     mode: "0644"
   vars:
-    app_name: "{{ docker_app.name }}"
-    app_image: "{{ docker_app.image | default(_catalog_entry.image | default('')) }}"
-    app_port: "{{ docker_app.port | default(_catalog_entry.port | default('')) }}"
+    app_name: "{{ current_docker_app.name }}"
+    app_image: "{{ current_docker_app.image | default(_catalog_entry.image | default('')) }}"
+    app_port: "{{ current_docker_app.port | default(_catalog_entry.port | default('')) }}"
     # A tcp_funnel_port entry defaults to expose_http: false - it's clearly
     # a raw TCP service, and defaulting it to also register an HTTP router
     # would collide with every other app's PathPrefix('/') rule (confirmed
     # live: redis-external/mongodb-external were silently competing with
     # nginx for the same root route). Still overridable if truly needed.
-    expose_http: "{{ docker_app.expose_http | default(_catalog_entry.expose_http | default(false if docker_app.tcp_funnel_port is defined else true)) }}"
-    path_prefix: "{{ docker_app.path_prefix | default('/') }}"
-    app_command: "{{ docker_app.command | default(_catalog_entry.default_command | default([])) }}"
-    app_environment: "{{ docker_app.environment | default(_catalog_entry.default_environment | default({})) }}"
+    expose_http: "{{ current_docker_app.expose_http | default(_catalog_entry.expose_http | default(false if current_docker_app.tcp_funnel_port is defined else true)) }}"
+    path_prefix: "{{ current_docker_app.path_prefix | default('/') }}"
+    app_command: "{{ current_docker_app.command | default(_catalog_entry.default_command | default([])) }}"
+    app_environment: "{{ current_docker_app.environment | default(_catalog_entry.default_environment | default({})) }}"
     # Docker-run-style passthroughs - same "source:target[:mode]"/"host:container"
     # syntax as `docker run -v`/`-p`, any number of entries, named volumes or
     # bind mounts mixed freely. app_extra_compose is a raw escape hatch merged
     # straight into the service definition for anything not modeled explicitly
     # here (restart policy, user, privileged, entrypoint, healthcheck, etc).
-    app_volumes: "{{ docker_app.volumes | default(_catalog_entry.default_volumes | default([])) }}"
-    app_ports: "{{ docker_app.ports | default([]) }}"
-    app_extra_compose: "{{ docker_app.extra_compose | default({}) }}"
-    tcp_funnel_port: "{{ docker_app.tcp_funnel_port | default('') }}"
-  no_log: "{{ docker_app.name == 'wordpress' }}"
+    app_volumes: "{{ current_docker_app.volumes | default(_catalog_entry.default_volumes | default([])) }}"
+    app_ports: "{{ current_docker_app.ports | default([]) }}"
+    app_extra_compose: "{{ current_docker_app.extra_compose | default({}) }}"
+    tcp_funnel_port: "{{ current_docker_app.tcp_funnel_port | default('') }}"
+  no_log: "{{ current_docker_app.name == 'wordpress' }}"
 
-- name: Start {{ docker_app.name }}
+- name: Start {{ current_docker_app.name }}
   # --quiet-pull suppresses per-layer pull progress, which can run to
   # megabytes of output and get truncated by AWX's log display, burying the
   # actual error underneath it. Captured explicitly and re-raised below so
@@ -56,12 +56,12 @@
   # need to SSH in and look for it.
   ansible.builtin.command: docker compose up -d --quiet-pull
   args:
-    chdir: "/opt/{{ docker_app.name }}"
+    chdir: "/opt/{{ current_docker_app.name }}"
   register: docker_app_up
   changed_when: true
   failed_when: false
 
-- name: Fail with the full {{ docker_app.name }} startup error, if any
+- name: Fail with the full {{ current_docker_app.name }} startup error, if any
   ansible.builtin.fail:
-    msg: "{{ docker_app.name }} failed to start (rc={{ docker_app_up.rc }}):\n{{ docker_app_up.stderr }}"
+    msg: "{{ current_docker_app.name }} failed to start (rc={{ docker_app_up.rc }}):\n{{ docker_app_up.stderr }}"
   when: docker_app_up.rc != 0

@@ -25,4 +25,4 @@
       ansible.builtin.include_tasks: create_template_block.yml
       loop: "{{ os_types }}"
       loop_control:
-        loop_var: os_type
+        loop_var: current_os_type

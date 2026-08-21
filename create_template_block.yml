@@ -1,11 +1,11 @@
-# Included (not run directly) with os_type, os_image_lookup, iso_dir,
+# Included (not run directly) with current_os_type, os_image_lookup, iso_dir,
 # local_cache_dir, storage, bridge, memory, cores already set by the caller.
 # Leaves `template_id` and `template_name` set in the parent scope either way.
 
-- name: Set template name and image URL for {{ os_type }}
+- name: Set template name and image URL for {{ current_os_type }}
   ansible.builtin.set_fact:
-    template_name: "{{ os_image_lookup[os_type]['name'] }}"
-    image_url: "{{ os_image_lookup[os_type]['url'] }}"
+    template_name: "{{ os_image_lookup[current_os_type]['name'] }}"
+    image_url: "{{ os_image_lookup[current_os_type]['url'] }}"
 
 - name: Check whether this template already exists on the Proxmox host
   ansible.builtin.shell: |
@@ -129,4 +129,4 @@
 
     - name: Show template creation message
       ansible.builtin.debug:
-        msg: "Cloud-init template '{{ template_name }}' with ID {{ template_id }} created for OS {{ os_type }}."
+        msg: "Cloud-init template '{{ template_name }}' with ID {{ template_id }} created for OS {{ current_os_type }}."

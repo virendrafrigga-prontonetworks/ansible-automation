@@ -28,4 +28,4 @@
       ansible.builtin.include_tasks: delete_docker_app_block.yml
       loop: "{{ app_names }}"
       loop_control:
-        loop_var: app_name
+        loop_var: current_app_name
