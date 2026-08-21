@@ -1,0 +1,29 @@
+# Included (not run directly) with app_name (loop var) already set by the caller.
+
+- name: Check whether {{ app_name }}'s directory exists
+  ansible.builtin.stat:
+    path: "/opt/{{ app_name }}"
+  register: app_dir
+
+- name: Report and skip if {{ app_name }} isn't deployed
+  when: not app_dir.stat.exists
+  ansible.builtin.debug:
+    msg: "No app named '{{ app_name }}' found at /opt/{{ app_name }} - nothing to delete."
+
+- name: Tear down and remove {{ app_name }}
+  when: app_dir.stat.exists
+  block:
+    - name: Stop and remove {{ app_name }}'s containers, networks and volumes
+      ansible.builtin.command: docker compose down --volumes
+      args:
+        chdir: "/opt/{{ app_name }}"
+      changed_when: true
+
+    - name: Remove {{ app_name }}'s directory
+      ansible.builtin.file:
+        path: "/opt/{{ app_name }}"
+        state: absent
+
+    - name: Show result
+      ansible.builtin.debug:
+        msg: "App '{{ app_name }}' removed. Re-run Install_Docker_And_App.yml if you want to redeploy it."
