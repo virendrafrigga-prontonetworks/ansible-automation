@@ -76,11 +76,22 @@
         template_id: "{{ nextid.stdout | trim }}"
 
     - name: Create VM shell for the template
+      # --cpu matters: Proxmox's default (kvm64) is a very old, generic CPU
+      # model missing modern instruction sets. Confirmed twice now with real
+      # evidence, not speculation: (1) it can't boot RHEL9-family kernels at
+      # all (CentOS/Rocky/AlmaLinux hung silently at boot - see git history),
+      # and (2) it lacks AVX, which MongoDB 5.0+ requires - every mongo
+      # container crash-loops with exit code 132 (SIGILL) under kvm64,
+      # confirmed live and matches MongoDB/Proxmox's own documented fix.
+      # 'host' passes through the real physical CPU's features, guaranteeing
+      # both are covered - fine for this single-node Proxmox setup with no
+      # live-migration-to-different-hardware concern.
       ansible.builtin.command: >-
         qm create {{ template_id }}
         --name {{ template_name }}
         --memory {{ memory }}
         --cores {{ cores }}
+        --cpu host
         --net0 virtio,bridge={{ bridge }}
       args:
         creates: "/etc/pve/qemu-server/{{ template_id }}.conf"
