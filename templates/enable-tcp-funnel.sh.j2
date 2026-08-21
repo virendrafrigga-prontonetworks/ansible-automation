@@ -1,9 +1,18 @@
 #!/bin/bash
-# Waits for this node's tailnet admin approval, then enables raw TCP Funnel
-# forwarding for a non-HTTP service (e.g. Redis) so it's reachable from
-# genuinely external networks/VPCs, not just the tailnet. Mirrors
-# enable-funnel.sh's approval-polling pattern, using 'tailscale funnel --tcp'
-# instead of the HTTP serve+funnel combo.
+# Waits for this node's tailnet admin approval, then enables TLS-terminated
+# TCP Funnel forwarding for a non-HTTP service (e.g. Redis) so it's reachable
+# from genuinely external networks/VPCs, not just the tailnet. Mirrors
+# enable-funnel.sh's approval-polling pattern.
+#
+# Uses --tls-terminated-tcp, not plain --tcp: confirmed live that plain --tcp
+# mode on this tailnet completes the TCP handshake but never actually relays
+# any application data in either direction (matches a known open Tailscale
+# issue with --tcp being inconsistent on 443/8443/10000) - Redis's own logs
+# showed zero incoming connections even while a client believed it was
+# connected. --tls-terminated-tcp (Tailscale terminates TLS at its edge, then
+# forwards plain TCP to the backend) was confirmed working end-to-end via a
+# real AUTH+PING round trip. The client must connect with TLS even though the
+# backend service itself has no TLS of its own (e.g. `redis-cli --tls`).
 set -uo pipefail
 
 LOGFILE="/var/log/tailscale-tcp-funnel.log"
@@ -13,11 +22,11 @@ FUNNEL_PORT="{{ tcp_funnel_port }}"
 LOCAL_PORT="{{ local_port }}"
 ERR_FILE="$(mktemp)"
 
-echo "[$(date -Is)] Waiting for tailnet admin approval before enabling TCP Funnel on port $FUNNEL_PORT -> localhost:$LOCAL_PORT..."
+echo "[$(date -Is)] Waiting for tailnet admin approval before enabling TLS-terminated TCP Funnel on port $FUNNEL_PORT -> localhost:$LOCAL_PORT..."
 
 APPROVED=false
 for i in {1..2880}; do
-    if tailscale funnel --bg --tcp="$FUNNEL_PORT" "localhost:$LOCAL_PORT" 2>"$ERR_FILE"; then
+    if tailscale funnel --bg --tls-terminated-tcp="$FUNNEL_PORT" "localhost:$LOCAL_PORT" 2>"$ERR_FILE"; then
         APPROVED=true
         break
     fi
@@ -25,7 +34,7 @@ for i in {1..2880}; do
         sleep 30
         continue
     fi
-    echo "[$(date -Is)] ERROR: tailscale funnel --tcp failed for a reason other than pending approval:"
+    echo "[$(date -Is)] ERROR: tailscale funnel --tls-terminated-tcp failed for a reason other than pending approval:"
     cat "$ERR_FILE"
     rm -f "$ERR_FILE"
     exit 1
@@ -34,8 +43,8 @@ rm -f "$ERR_FILE"
 
 if [ "$APPROVED" != true ]; then
     echo "[$(date -Is)] ERROR: still not approved after 24 hours - giving up. Once approved, run manually:"
-    echo "  tailscale funnel --bg --tcp=$FUNNEL_PORT localhost:$LOCAL_PORT"
+    echo "  tailscale funnel --bg --tls-terminated-tcp=$FUNNEL_PORT localhost:$LOCAL_PORT"
     exit 1
 fi
 
-echo "[$(date -Is)] TCP Funnel enabled - reachable at {{ tailscale_hostname }}.<your-tailnet>.ts.net:$FUNNEL_PORT"
+echo "[$(date -Is)] TLS-terminated TCP Funnel enabled - reachable (with TLS) at {{ tailscale_hostname }}.<your-tailnet>.ts.net:$FUNNEL_PORT"
