@@ -37,6 +37,12 @@
         path_prefix: "/"
     app_hostname: "{{ target_host }}"          # From AWX Survey - Host() the apps should answer to behind Traefik
     wordpress_db_password: ""                  # From AWX Survey/Vault - required when wordpress is in docker_apps
+    # From AWX Credential/Vault - the same Reusable + Tagged Tailscale auth
+    # key used by Playbook 1/3. Required for the re-tag step below - 'tailscale
+    # up' without an auth key on an already-joined node can drop it into a
+    # logged-out state instead of just updating its settings (seen live).
+    # Never hardcode a real key here.
+    tailscale_authkey: ""
     # Private by default - only expose to the real internet if explicitly asked.
     # Everything here goes through Traefik on 80/443, so this doesn't need to
     # vary per-app the way LXC's expose_port might.
@@ -119,11 +125,15 @@
       # 'tailscale set --advertise-tags' doesn't exist in current tailscale
       # versions - only 'up' (and 'login') accept it. Re-running 'up' on an
       # already-joined node requires restating its current non-default
-      # settings (hostname, --ssh) alongside the new tags, or it refuses to
-      # apply anything - no auth key needed for this, just a settings update.
+      # settings (hostname, --ssh) alongside the new tags. Omitting
+      # --auth-key here was tried and reverted - it dropped a live node into
+      # a "Logged out" state instead of just updating its settings (a
+      # Reusable key is safe to resupply every time, so always include it).
       ansible.builtin.command: >-
-        tailscale up --advertise-tags=tag:vm-provisioned,tag:docker-host --hostname={{ target_host }} --ssh
+        tailscale up --auth-key={{ tailscale_authkey }}
+        --advertise-tags=tag:vm-provisioned,tag:docker-host --hostname={{ target_host }} --ssh --accept-dns=true
       changed_when: true
+      no_log: true
       # Requires your tailnet ACL's tagOwners to permit this node re-tagging itself as tag:docker-host.
 
     - name: Expose this VM to the public internet via Tailscale Funnel
