@@ -23,15 +23,23 @@
   vars:
     # From AWX Survey - one VM can run several containers side by side. Each
     # docker_apps entry works the same way regardless of what it is - a
-    # database, a web server, or any custom app:
+    # database, a web server, or any custom app - with the same range as a
+    # plain `docker run` command:
     #   name: <docker_app_catalog key, or anything for a custom app>
-    #   image, port           - required for a custom app; override a catalog
+    #   image, port            - required for a custom app; override a catalog
     #                            preset's defaults too, if given
-    #   command, environment  - optional passthroughs to the container (e.g.
+    #   command, environment   - optional passthroughs to the container (e.g.
     #                            a database's own auth setup)
-    #   volume_path            - optional, mounts a named volume there for
-    #                            persistence
-    #   mount_docker_socket    - optional bool
+    #   volumes                - list of "source:target[:mode]" strings, same
+    #                            syntax as `docker run -v` - named volumes and
+    #                            bind mounts freely mixed, any number of them
+    #   ports                  - list of "host:container" strings for any
+    #                            EXTRA port publishing beyond expose_http/
+    #                            tcp_funnel_port below (like `docker run -p`)
+    #   extra_compose           - raw dict merged straight into the compose
+    #                            service definition, for anything not covered
+    #                            above (restart policy, user, privileged,
+    #                            entrypoint, healthcheck, cap_add, etc)
     #   expose_http + path_prefix - HTTP path-routing through Traefik, shared
     #                            across every HTTP app on the one Funnel URL
     #   tcp_funnel_port        - raw TCP Funnel forwarding (443/8443/10000),

@@ -1,7 +1,7 @@
 # Included (not run directly) with docker_app (loop var - see
 # Install_Docker_And_App.yml for the full entry schema: name, and optionally
-# image/port/expose_http/path_prefix/command/environment/volume_path/
-# mount_docker_socket/tcp_funnel_port), docker_app_catalog, wordpress_db_password
+# image/port/expose_http/path_prefix/command/environment/volumes/ports/
+# extra_compose/tcp_funnel_port), docker_app_catalog, wordpress_db_password
 # already set by the caller.
 #
 # Every field on a docker_app entry overrides its catalog default (looked up
@@ -32,8 +32,14 @@
     path_prefix: "{{ docker_app.path_prefix | default('/') }}"
     app_command: "{{ docker_app.command | default(_catalog_entry.default_command | default([])) }}"
     app_environment: "{{ docker_app.environment | default(_catalog_entry.default_environment | default({})) }}"
-    volume_path: "{{ docker_app.volume_path | default(_catalog_entry.volume_path | default('')) }}"
-    mount_docker_socket: "{{ docker_app.mount_docker_socket | default(_catalog_entry.mount_docker_socket | default(false)) }}"
+    # Docker-run-style passthroughs - same "source:target[:mode]"/"host:container"
+    # syntax as `docker run -v`/`-p`, any number of entries, named volumes or
+    # bind mounts mixed freely. app_extra_compose is a raw escape hatch merged
+    # straight into the service definition for anything not modeled explicitly
+    # here (restart policy, user, privileged, entrypoint, healthcheck, etc).
+    app_volumes: "{{ docker_app.volumes | default(_catalog_entry.default_volumes | default([])) }}"
+    app_ports: "{{ docker_app.ports | default([]) }}"
+    app_extra_compose: "{{ docker_app.extra_compose | default({}) }}"
     tcp_funnel_port: "{{ docker_app.tcp_funnel_port | default('') }}"
   no_log: "{{ docker_app.name == 'wordpress' }}"
 

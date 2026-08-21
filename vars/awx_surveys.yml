@@ -70,6 +70,17 @@ install_docker_app_survey:
   #       command: ["redis-server", "--requirepass", "some-strong-password"]
   #       tcp_funnel_port: 10000      # 443, 8443, or 10000 - must not collide
   #                                   # with the HTTP apps' Funnel port (443)
+  #     - name: my-db                 # same range as a plain `docker run` command
+  #       image: "postgres:16"
+  #       port: 5432
+  #       environment:
+  #         POSTGRES_PASSWORD: "some-strong-password"
+  #       volumes:                    # named or bind-mounted, any number
+  #         - "my_db_data:/var/lib/postgresql/data"
+  #       ports:                      # extra host port publishing, if needed
+  #         - "5432:5432"
+  #       extra_compose:              # raw passthrough for anything else
+  #         restart: "always"
   # (path_prefix is ignored whenever expose_http resolves to false; setting
   # tcp_funnel_port on any entry is itself the opt-in for that one app,
   # independent of expose_to_internet below - auth is the entry's own

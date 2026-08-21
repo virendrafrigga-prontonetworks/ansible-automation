@@ -5,18 +5,17 @@
 # custom app. See install_docker_app_block.yml for the resolution order.
 #
 # Fields:
-#   image, port          - what to run and what port it listens on
-#   expose_http          - true: gets an HTTP path route through Traefik
-#                           (needs path_prefix on the entry). false: no
-#                           Traefik route at all (the entry may still use
-#                           tcp_funnel_port instead, or stay fully internal).
-#   volume_path           - if set, a named volume is mounted here for
-#                           persistence (e.g. a database's data directory)
-#   mount_docker_socket   - if true, mounts /var/run/docker.sock (only
-#                           portainer needs this)
-#   default_command       - default command override (a list), e.g. to set
-#                           up default auth - the entry can still override it
-#   default_environment   - default environment variables (a dict)
+#   image, port            - what to run and what port it listens on
+#   expose_http            - true: gets an HTTP path route through Traefik
+#                             (needs path_prefix on the entry). false: no
+#                             Traefik route at all (the entry may still use
+#                             tcp_funnel_port instead, or stay fully internal).
+#   default_volumes        - list of "source:target[:mode]" strings, same
+#                             syntax as `docker run -v` / compose's own
+#                             volumes list - named volumes and bind mounts
+#                             can be mixed freely, any number of entries.
+#   default_command         - default command override (a list)
+#   default_environment      - default environment variables (a dict)
 #
 # wordpress is a genuine multi-service dependency graph (app + its own DB),
 # so it keeps its own dedicated template instead of using the generic one -
@@ -34,8 +33,9 @@ docker_app_catalog:
     image: "portainer/portainer-ce:latest"
     port: 9000
     expose_http: true
-    volume_path: "/data"
-    mount_docker_socket: true
+    default_volumes:
+      - "/var/run/docker.sock:/var/run/docker.sock"
+      - "portainer_data:/data"
   redis:
     image: "redis:latest"
     port: 6379
@@ -44,4 +44,5 @@ docker_app_catalog:
     image: "mongo:latest"
     port: 27017
     expose_http: false
-    volume_path: "/data/db"
+    default_volumes:
+      - "mongodb_data:/data/db"

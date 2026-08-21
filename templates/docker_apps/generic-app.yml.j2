@@ -1,73 +1,66 @@
-version: "3.8"
+{#
+Generic single-container template used by every docker_apps entry except
+wordpress (a genuine multi-service dependency graph, not one container).
+Builds the compose file as a real data structure rather than hand-written
+YAML, so it can support the same range as a plain `docker run` command:
+multiple volumes (named or bind-mounted), arbitrary extra port publishing,
+env vars, a command override, and - for anything not modeled here -
+app_extra_compose, a raw dict merged straight into the service definition
+(restart policy, user, privileged, entrypoint, healthcheck, cap_add, etc).
 
-# Generic single-container template used by every docker_apps entry except
-# wordpress (which is a genuine multi-service dependency graph, not
-# expressible as one container). Covers any catalog preset or any custom
-# image - the same capabilities apply either way: a custom command,
-# environment variables, a persistent volume, mounting the Docker socket,
-# and independently, any of three exposure modes:
-#   - neither expose_http nor tcp_funnel_port set: internal-only, reachable
-#     by other containers on this VM by name, never externally.
-#   - expose_http: HTTP path-routed through Traefik (needs path_prefix).
-#   - tcp_funnel_port: raw TCP Funnel forwarding, reachable from genuinely
-#     outside the tailnet (any VPC/network) - for non-HTTP services like a
-#     database. Auth (if any) is the entry's own responsibility via
-#     command/environment (e.g. redis's --requirepass) - never expose a
-#     database this way without one.
+Exposure is still the three-way choice used everywhere else in this
+project, independent of the raw docker-run-style fields above:
+  - neither expose_http nor tcp_funnel_port set: internal-only.
+  - expose_http: HTTP path-routed through Traefik (needs path_prefix).
+  - tcp_funnel_port: raw TCP Funnel forwarding, reachable from genuinely
+    outside the tailnet. Auth (if any) is the entry's own responsibility
+    via app_command/app_environment - never set this on a database with
+    no auth configured.
+#}
+{% set service = {
+  'image': app_image,
+  'restart': 'unless-stopped',
+  'networks': (['web'] if expose_http else []) + ['internal'],
+} %}
+{% if app_command %}{% set _ = service.update({'command': app_command}) %}{% endif %}
+{% if app_environment %}{% set _ = service.update({'environment': app_environment}) %}{% endif %}
 
-networks:
-  web:
-    external: true
-  internal:
-    external: true
-
-{% if volume_path %}
-volumes:
-  {{ app_name }}_data:
-
-{% endif %}
-services:
-  {{ app_name }}:
-    image: "{{ app_image }}"
-    restart: unless-stopped
-{% if app_command %}
-    command: {{ app_command | to_json }}
-{% endif %}
-{% if app_environment %}
-    environment:
-{% for k, v in app_environment.items() %}
-      {{ k }}: "{{ v }}"
-{% endfor %}
-{% endif %}
-{% if volume_path or mount_docker_socket %}
-    volumes:
-{% if mount_docker_socket %}
-      - /var/run/docker.sock:/var/run/docker.sock
-{% endif %}
-{% if volume_path %}
-      - {{ app_name }}_data:{{ volume_path }}
-{% endif %}
-{% endif %}
+{% set volumes = app_volumes | default([]) | list %}
+{% set ports = app_ports | default([]) | list %}
 {% if tcp_funnel_port %}
-    ports:
-      # Bound to the host's loopback only, not the VM's LAN IP - Tailscale
-      # Funnel's TCP forwarder reaches it via localhost on the host itself.
-      - "127.0.0.1:{{ app_port }}:{{ app_port }}"
+{#
+  Bound to the host's loopback only, not the VM's LAN IP - Tailscale
+  Funnel's TCP forwarder reaches it via localhost on the host itself.
+#}
+{% set _ = ports.append('127.0.0.1:' ~ app_port ~ ':' ~ app_port) %}
 {% endif %}
-    networks:
+{% if volumes %}{% set _ = service.update({'volumes': volumes}) %}{% endif %}
+{% if ports %}{% set _ = service.update({'ports': ports}) %}{% endif %}
+
 {% if expose_http %}
-      - web
-{% endif %}
-      - internal
-{% if expose_http %}
-    labels:
-      - "traefik.enable=true"
+{% set labels = ['traefik.enable=true'] %}
 {% if path_prefix == '/' %}
-      - "traefik.http.routers.{{ app_name }}.rule=PathPrefix(`/`)"
+{% set _ = labels.append('traefik.http.routers.' ~ app_name ~ '.rule=PathPrefix(`/`)') %}
 {% else %}
-      - "traefik.http.routers.{{ app_name }}.rule=PathPrefix(`{{ path_prefix }}`)"
-      - "traefik.http.middlewares.{{ app_name }}-stripprefix.stripprefix.prefixes={{ path_prefix }}"
-      - "traefik.http.routers.{{ app_name }}.middlewares={{ app_name }}-stripprefix"
+{% set _ = labels.append('traefik.http.routers.' ~ app_name ~ '.rule=PathPrefix(`' ~ path_prefix ~ '`)') %}
+{% set _ = labels.append('traefik.http.middlewares.' ~ app_name ~ '-stripprefix.stripprefix.prefixes=' ~ path_prefix) %}
+{% set _ = labels.append('traefik.http.routers.' ~ app_name ~ '.middlewares=' ~ app_name ~ '-stripprefix') %}
 {% endif %}
-      - "traefik.http.services.{{ app_name }}.loadbalancer.server.port={{ app_port }}"
+{% set _ = labels.append('traefik.http.services.' ~ app_name ~ '.loadbalancer.server.port=' ~ app_port) %}
+{% set _ = service.update({'labels': labels}) %}
 {% endif %}
+
+{% if app_extra_compose %}{% set _ = service.update(app_extra_compose) %}{% endif %}
+
+{% set named_volumes = {} %}
+{% for v in volumes %}
+{% set source = v.split(':')[0] %}
+{% if not (source.startswith('/') or source.startswith('./') or source.startswith('~/')) %}
+{% set _ = named_volumes.update({source: none}) %}
+{% endif %}
+{% endfor %}
+
+{% set compose = {'networks': {'web': {'external': true}, 'internal': {'external': true}}} %}
+{% if named_volumes %}{% set _ = compose.update({'volumes': named_volumes}) %}{% endif %}
+{% set _ = compose.update({'services': {app_name: service}}) %}
+{{ compose | to_nice_yaml(indent=2) }}
