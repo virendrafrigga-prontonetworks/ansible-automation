@@ -13,14 +13,20 @@ services:
     # added automatic API version negotiation, fixing this for good.
     image: traefik:v3.6
     restart: unless-stopped
+    # No websecure/443 entrypoint - it was never actually used. Tailscale
+    # Funnel/Serve already terminates the public HTTPS connection on 443
+    # itself and forwards plain HTTP to this VM's port 80 (confirmed
+    # earlier: 'tailscale serve --bg 80' proxies public 443 to local 80,
+    # not the other way around). Publishing 443 here just collided with
+    # tailscaled, which independently binds 443 on its own tailnet IP for
+    # its baseline HTTPS cert-serving - confirmed live via a real deploy
+    # failure ("address already in use").
     command:
       - "--providers.docker=true"
       - "--providers.docker.exposedbydefault=false"
       - "--entrypoints.web.address=:80"
-      - "--entrypoints.websecure.address=:443"
     ports:
       - "80:80"
-      - "443:443"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     networks:
