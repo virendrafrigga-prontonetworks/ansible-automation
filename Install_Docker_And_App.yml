@@ -21,24 +21,36 @@
     - vars/docker_apps.yml
 
   vars:
-    # From AWX Survey - one VM can run several containers side by side,
-    # routed by path behind the single Traefik instance/Funnel URL. Each
-    # entry is either:
-    #   - a catalog preset:  {name: <docker_app_catalog key>, path_prefix: "/x"}
-    #   - a custom image:    {name: <anything>, image: "<any registry>/img:tag",
-    #                         port: <container's listening port>, path_prefix: "/x"}
-    # A custom entry's own image/port always win over any catalog lookup.
-    # path_prefix is ignored whenever expose_http resolves to false (either
-    # a catalog preset like redis/mongodb, or a custom entry with
-    # expose_http: false set explicitly) - those never get a Traefik route,
-    # only reachable from other containers on this VM over 'internal'.
+    # From AWX Survey - one VM can run several containers side by side. Each
+    # docker_apps entry works the same way regardless of what it is - a
+    # database, a web server, or any custom app:
+    #   name: <docker_app_catalog key, or anything for a custom app>
+    #   image, port           - required for a custom app; override a catalog
+    #                            preset's defaults too, if given
+    #   command, environment  - optional passthroughs to the container (e.g.
+    #                            a database's own auth setup)
+    #   volume_path            - optional, mounts a named volume there for
+    #                            persistence
+    #   mount_docker_socket    - optional bool
+    #   expose_http + path_prefix - HTTP path-routing through Traefik, shared
+    #                            across every HTTP app on the one Funnel URL
+    #   tcp_funnel_port        - raw TCP Funnel forwarding (443/8443/10000),
+    #                            for a non-HTTP service (e.g. a database)
+    #                            reachable from genuinely outside the tailnet.
+    #                            Independent of expose_to_internet below -
+    #                            setting this on an entry is itself the
+    #                            opt-in. Auth is the entry's own
+    #                            responsibility via command/environment -
+    #                            never set this on a database with no auth.
+    # Any field left unset falls back to the catalog preset's default (see
+    # vars/docker_apps.yml); a name with no matching preset is a fully
+    # custom app and needs its own image/port.
     docker_apps:
       - name: nginx
         path_prefix: "/"
     wordpress_db_password: ""                  # From AWX Survey/Vault - required when wordpress is in docker_apps
     # Private by default - only expose to the real internet if explicitly asked.
-    # Everything here goes through Traefik on 80/443, so this doesn't need to
-    # vary per-app the way LXC's expose_port might.
+    # Covers every HTTP app above at once, via the one shared Traefik/Funnel URL.
     expose_to_internet: false                  # From AWX Survey
     expose_port: 80                            # From AWX Survey - Traefik's own port
 
@@ -114,7 +126,16 @@
       loop_control:
         loop_var: docker_app
 
-    - name: Expose this VM to the public internet via Tailscale Funnel
+    - name: Expose any app with tcp_funnel_port set outside the tailnet
+      # Generic - works for any docker_apps entry, not just a specific name.
+      # Independent of expose_to_internet below - setting tcp_funnel_port on
+      # an entry is itself the explicit opt-in for that one app.
+      ansible.builtin.include_tasks: expose_tcp_funnel_block.yml
+      loop: "{{ docker_apps | selectattr('tcp_funnel_port', 'defined') | list }}"
+      loop_control:
+        loop_var: docker_app
+
+    - name: Expose HTTP apps to the public internet via Tailscale Funnel
       # Private by default. Only runs when explicitly requested. Approval can
       # take anywhere from seconds to days, so this doesn't wait or fail on
       # it here - it hands off to a detached script running inside the VM
@@ -144,7 +165,7 @@
         msg: >-
           Deployed on {{ target_host }} behind Traefik (ports 80/443, routed by path - reachable via the tailnet
           hostname, tailnet IP, or public Funnel URL alike):
-          {% for a in docker_apps %}{% set is_http = a.expose_http | default(docker_app_catalog[a.name].expose_http if a.name in docker_app_catalog else true) %}{{ a.name }}{{ ' at path ' ~ (a.path_prefix | default('/')) if is_http else ' (internal-only, no path/Funnel access)' }}{{ ', ' if not loop.last else '' }}{% endfor %}.
+          {% for a in docker_apps %}{% set catalog_entry = docker_app_catalog[a.name] | default({}) %}{% set is_http = a.expose_http | default(catalog_entry.expose_http | default(true)) %}{{ a.name }}{{ (' via TCP Funnel on port ' ~ a.tcp_funnel_port ~ ' (reachable outside the tailnet)') if a.tcp_funnel_port is defined else (' at path ' ~ (a.path_prefix | default('/')) if is_http else ' (internal-only, no path/Funnel access)') }}{{ ', ' if not loop.last else '' }}{% endfor %}.
           {{ ('A background script on ' ~ target_host ~ ' is waiting for tailnet admin approval, then will expose it '
               ~ 'at https://' ~ target_host ~ '.<your-tailnet>.ts.net - check /var/log/tailscale-funnel.log there for status.')
              if (expose_to_internet | bool)

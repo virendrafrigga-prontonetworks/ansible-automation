@@ -1,0 +1,73 @@
+version: "3.8"
+
+# Generic single-container template used by every docker_apps entry except
+# wordpress (which is a genuine multi-service dependency graph, not
+# expressible as one container). Covers any catalog preset or any custom
+# image - the same capabilities apply either way: a custom command,
+# environment variables, a persistent volume, mounting the Docker socket,
+# and independently, any of three exposure modes:
+#   - neither expose_http nor tcp_funnel_port set: internal-only, reachable
+#     by other containers on this VM by name, never externally.
+#   - expose_http: HTTP path-routed through Traefik (needs path_prefix).
+#   - tcp_funnel_port: raw TCP Funnel forwarding, reachable from genuinely
+#     outside the tailnet (any VPC/network) - for non-HTTP services like a
+#     database. Auth (if any) is the entry's own responsibility via
+#     command/environment (e.g. redis's --requirepass) - never expose a
+#     database this way without one.
+
+networks:
+  web:
+    external: true
+  internal:
+    external: true
+
+{% if volume_path %}
+volumes:
+  {{ app_name }}_data:
+
+{% endif %}
+services:
+  {{ app_name }}:
+    image: "{{ app_image }}"
+    restart: unless-stopped
+{% if app_command %}
+    command: {{ app_command | to_json }}
+{% endif %}
+{% if app_environment %}
+    environment:
+{% for k, v in app_environment.items() %}
+      {{ k }}: "{{ v }}"
+{% endfor %}
+{% endif %}
+{% if volume_path or mount_docker_socket %}
+    volumes:
+{% if mount_docker_socket %}
+      - /var/run/docker.sock:/var/run/docker.sock
+{% endif %}
+{% if volume_path %}
+      - {{ app_name }}_data:{{ volume_path }}
+{% endif %}
+{% endif %}
+{% if tcp_funnel_port %}
+    ports:
+      # Bound to the host's loopback only, not the VM's LAN IP - Tailscale
+      # Funnel's TCP forwarder reaches it via localhost on the host itself.
+      - "127.0.0.1:{{ app_port }}:{{ app_port }}"
+{% endif %}
+    networks:
+{% if expose_http %}
+      - web
+{% endif %}
+      - internal
+{% if expose_http %}
+    labels:
+      - "traefik.enable=true"
+{% if path_prefix == '/' %}
+      - "traefik.http.routers.{{ app_name }}.rule=PathPrefix(`/`)"
+{% else %}
+      - "traefik.http.routers.{{ app_name }}.rule=PathPrefix(`{{ path_prefix }}`)"
+      - "traefik.http.middlewares.{{ app_name }}-stripprefix.stripprefix.prefixes={{ path_prefix }}"
+      - "traefik.http.routers.{{ app_name }}.middlewares={{ app_name }}-stripprefix"
+{% endif %}
+      - "traefik.http.services.{{ app_name }}.loadbalancer.server.port={{ app_port }}"
+{% endif %}

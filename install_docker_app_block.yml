@@ -1,7 +1,17 @@
-# Included (not run directly) with docker_app (loop var: {name, path_prefix,
-# and optionally image/port/expose_http for a custom app not in the
-# catalog}), docker_app_catalog, wordpress_db_password already set by the
-# caller.
+# Included (not run directly) with docker_app (loop var - see
+# Install_Docker_And_App.yml for the full entry schema: name, and optionally
+# image/port/expose_http/path_prefix/command/environment/volume_path/
+# mount_docker_socket/tcp_funnel_port), docker_app_catalog, wordpress_db_password
+# already set by the caller.
+#
+# Every field on a docker_app entry overrides its catalog default (looked up
+# by name); a name with no matching catalog entry is a fully custom app and
+# must supply its own image/port. wordpress is the one exception - it always
+# uses its own dedicated multi-service template regardless of these fields.
+
+- name: Resolve {{ docker_app.name }}'s catalog defaults, if any
+  ansible.builtin.set_fact:
+    _catalog_entry: "{{ docker_app_catalog[docker_app.name] | default({}) }}"
 
 - name: Ensure app directory exists for {{ docker_app.name }}
   ansible.builtin.file:
@@ -11,18 +21,20 @@
 
 - name: Template compose file for {{ docker_app.name }}
   ansible.builtin.template:
-    # A custom image (docker_app.image set) always uses the generic
-    # single-container template, driven by the entry's own image/port -
-    # otherwise it's a catalog preset with its own dedicated template.
-    src: "{{ 'docker_apps/custom-app.yml.j2' if docker_app.image is defined else 'docker_apps/' ~ docker_app.name ~ '.yml.j2' }}"
+    src: "{{ 'docker_apps/wordpress.yml.j2' if docker_app.name == 'wordpress' else 'docker_apps/generic-app.yml.j2' }}"
     dest: "/opt/{{ docker_app.name }}/docker-compose.yml"
     mode: "0644"
   vars:
-    path_prefix: "{{ docker_app.path_prefix | default('/') }}"
     app_name: "{{ docker_app.name }}"
-    app_image: "{{ docker_app.image | default('') }}"
-    app_port: "{{ docker_app.port | default('') }}"
-    expose_http: "{{ docker_app.expose_http | default(true) }}"
+    app_image: "{{ docker_app.image | default(_catalog_entry.image | default('')) }}"
+    app_port: "{{ docker_app.port | default(_catalog_entry.port | default('')) }}"
+    expose_http: "{{ docker_app.expose_http | default(_catalog_entry.expose_http | default(true)) }}"
+    path_prefix: "{{ docker_app.path_prefix | default('/') }}"
+    app_command: "{{ docker_app.command | default(_catalog_entry.default_command | default([])) }}"
+    app_environment: "{{ docker_app.environment | default(_catalog_entry.default_environment | default({})) }}"
+    volume_path: "{{ docker_app.volume_path | default(_catalog_entry.volume_path | default('')) }}"
+    mount_docker_socket: "{{ docker_app.mount_docker_socket | default(_catalog_entry.mount_docker_socket | default(false)) }}"
+    tcp_funnel_port: "{{ docker_app.tcp_funnel_port | default('') }}"
   no_log: "{{ docker_app.name == 'wordpress' }}"
 
 - name: Start {{ docker_app.name }}

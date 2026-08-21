@@ -1,15 +1,26 @@
 ---
-# Catalog of Docker apps deployable via Install_Docker_And_App.yml. Each key
-# needs a matching templates/docker_apps/<key>.yml.j2 compose template.
+# Catalog of Docker app presets deployable via Install_Docker_And_App.yml.
+# Every field here is just a DEFAULT - any docker_apps entry can override
+# any of them, or skip the catalog entirely with its own image/port for a
+# custom app. See install_docker_app_block.yml for the resolution order.
 #
-# expose_http controls routing entirely:
-#   true  - gets a Traefik label-based router (Host + PathPrefix) on the
-#           shared 'web' network, reachable through the VM's public Funnel URL.
-#   false - raw TCP protocol (no HTTP path concept) or just not meant to be
-#           public - joins only the private 'internal' network, no Traefik
-#           labels, no host-published port. Reachable by other containers on
-#           this VM by container name (e.g. "redis:6379"), never externally.
-#           Never flip this to true for a database.
+# Fields:
+#   image, port          - what to run and what port it listens on
+#   expose_http          - true: gets an HTTP path route through Traefik
+#                           (needs path_prefix on the entry). false: no
+#                           Traefik route at all (the entry may still use
+#                           tcp_funnel_port instead, or stay fully internal).
+#   volume_path           - if set, a named volume is mounted here for
+#                           persistence (e.g. a database's data directory)
+#   mount_docker_socket   - if true, mounts /var/run/docker.sock (only
+#                           portainer needs this)
+#   default_command       - default command override (a list), e.g. to set
+#                           up default auth - the entry can still override it
+#   default_environment   - default environment variables (a dict)
+#
+# wordpress is a genuine multi-service dependency graph (app + its own DB),
+# so it keeps its own dedicated template instead of using the generic one -
+# everything else here is a single container.
 docker_app_catalog:
   nginx:
     image: "nginx:latest"
@@ -23,6 +34,8 @@ docker_app_catalog:
     image: "portainer/portainer-ce:latest"
     port: 9000
     expose_http: true
+    volume_path: "/data"
+    mount_docker_socket: true
   redis:
     image: "redis:latest"
     port: 6379
@@ -31,3 +44,4 @@ docker_app_catalog:
     image: "mongo:latest"
     port: 27017
     expose_http: false
+    volume_path: "/data/db"

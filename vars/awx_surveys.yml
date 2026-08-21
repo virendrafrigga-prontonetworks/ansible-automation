@@ -53,17 +53,28 @@ install_docker_app_survey:
   description: ""
   # 'docker_apps' (a list of app objects) doesn't fit AWX Survey's flat field
   # types (text/password/multiplechoice/integer). Set it directly in the Job
-  # Template's "Variables" field as YAML instead, e.g.:
+  # Template's "Variables" field as YAML instead. Every field works the same
+  # way for any app - a database, a web server, or a custom image - and
+  # falls back to a vars/docker_apps.yml catalog default when omitted:
   #   docker_apps:
-  #     - name: nginx                 # catalog preset (vars/docker_apps.yml)
-  #       path_prefix: "/"
+  #     - name: nginx                 # catalog preset
+  #       path_prefix: "/"            # HTTP path-routed through Traefik
   #     - name: my-app                # custom image, any registry
   #       image: "myregistry.example.com/my-app:1.2.3"
-  #       port: 3000                  # port the app listens on in its container
+  #       port: 3000
   #       path_prefix: "/myapp"
-  #     - name: redis                 # catalog preset, internal-only, no path needed
-  # (path_prefix is ignored whenever expose_http resolves to false - true by
-  # default for a custom entry unless you set expose_http: false on it)
+  #     - name: redis                 # catalog preset, internal-only by default
+  #     - name: redis-external        # any name - reachable OUTSIDE the tailnet
+  #       image: "redis:latest"
+  #       port: 6379
+  #       command: ["redis-server", "--requirepass", "some-strong-password"]
+  #       tcp_funnel_port: 10000      # 443, 8443, or 10000 - must not collide
+  #                                   # with the HTTP apps' Funnel port (443)
+  # (path_prefix is ignored whenever expose_http resolves to false; setting
+  # tcp_funnel_port on any entry is itself the opt-in for that one app,
+  # independent of expose_to_internet below - auth is the entry's own
+  # responsibility via command/environment, never expose a database this way
+  # without one)
   spec:
     - question_name: "Target Host"
       question_description: "Tailnet hostname of the VM from the Provision VM job (vm_name)"

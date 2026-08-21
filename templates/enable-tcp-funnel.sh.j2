@@ -1,0 +1,41 @@
+#!/bin/bash
+# Waits for this node's tailnet admin approval, then enables raw TCP Funnel
+# forwarding for a non-HTTP service (e.g. Redis) so it's reachable from
+# genuinely external networks/VPCs, not just the tailnet. Mirrors
+# enable-funnel.sh's approval-polling pattern, using 'tailscale funnel --tcp'
+# instead of the HTTP serve+funnel combo.
+set -uo pipefail
+
+LOGFILE="/var/log/tailscale-tcp-funnel.log"
+exec > >(tee -a "$LOGFILE") 2>&1
+
+FUNNEL_PORT="{{ tcp_funnel_port }}"
+LOCAL_PORT="{{ local_port }}"
+ERR_FILE="$(mktemp)"
+
+echo "[$(date -Is)] Waiting for tailnet admin approval before enabling TCP Funnel on port $FUNNEL_PORT -> localhost:$LOCAL_PORT..."
+
+APPROVED=false
+for i in {1..2880}; do
+    if tailscale funnel --bg --tcp="$FUNNEL_PORT" "localhost:$LOCAL_PORT" 2>"$ERR_FILE"; then
+        APPROVED=true
+        break
+    fi
+    if grep -q "not yet approved" "$ERR_FILE"; then
+        sleep 30
+        continue
+    fi
+    echo "[$(date -Is)] ERROR: tailscale funnel --tcp failed for a reason other than pending approval:"
+    cat "$ERR_FILE"
+    rm -f "$ERR_FILE"
+    exit 1
+done
+rm -f "$ERR_FILE"
+
+if [ "$APPROVED" != true ]; then
+    echo "[$(date -Is)] ERROR: still not approved after 24 hours - giving up. Once approved, run manually:"
+    echo "  tailscale funnel --bg --tcp=$FUNNEL_PORT localhost:$LOCAL_PORT"
+    exit 1
+fi
+
+echo "[$(date -Is)] TCP Funnel enabled - reachable at {{ tailscale_hostname }}.<your-tailnet>.ts.net:$FUNNEL_PORT"
