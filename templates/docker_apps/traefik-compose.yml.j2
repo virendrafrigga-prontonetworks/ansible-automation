@@ -6,7 +6,12 @@ networks:
 
 services:
   traefik:
-    image: traefik:v3.0
+    # v3.0's Docker provider hardcodes an old Docker API client (v1.24).
+    # Docker Engine 29+ raised its minimum supported API version to v1.44,
+    # so v3.0 can never talk to the daemon at all (silently discovers zero
+    # containers - Traefik itself stays up, just permanently blind). v3.6.1+
+    # added automatic API version negotiation, fixing this for good.
+    image: traefik:v3.6
     restart: unless-stopped
     command:
       - "--providers.docker=true"
