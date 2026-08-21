@@ -38,7 +38,16 @@ project, independent of the raw docker-run-style fields above:
 {% if ports %}{% set _ = service.update({'ports': ports}) %}{% endif %}
 
 {% if expose_http %}
-{% set labels = ['traefik.enable=true'] %}
+{#
+  Required whenever a container is on more than one network (every
+  expose_http app is, since it also joins 'internal'): without this,
+  Traefik's Docker provider picks an arbitrary one of the container's
+  networks to route through, and can pick 'internal' - a network Traefik
+  itself isn't even connected to - causing every request to silently time
+  out. Confirmed live via Traefik's own debug log registering the wrong
+  subnet entirely for nginx.
+#}
+{% set labels = ['traefik.enable=true', 'traefik.docker.network=web'] %}
 {% if path_prefix == '/' %}
 {% set _ = labels.append('traefik.http.routers.' ~ app_name ~ '.rule=PathPrefix(`/`)') %}
 {% else %}

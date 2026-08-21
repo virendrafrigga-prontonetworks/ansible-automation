@@ -41,6 +41,10 @@ services:
       - internal
     labels:
       - "traefik.enable=true"
+      # Required since this container is on both 'web' and 'internal' -
+      # without it Traefik's Docker provider can pick 'internal' to route
+      # through, a network Traefik itself isn't connected to at all.
+      - "traefik.docker.network=web"
 {% if path_prefix == '/' %}
       - "traefik.http.routers.wordpress.rule=PathPrefix(`/`)"
 {% else %}
