@@ -123,10 +123,22 @@
             mode: "0644"
 
         - name: Start Traefik
-          ansible.builtin.command: docker compose up -d
+          # --quiet-pull suppresses per-layer pull progress, which can run to
+          # megabytes of output and get truncated by AWX's log display,
+          # burying the actual error underneath it. Captured explicitly and
+          # re-raised below so the real failure is always fully visible in
+          # the job output itself - no need to SSH in and look for it.
+          ansible.builtin.command: docker compose up -d --quiet-pull
           args:
             chdir: /opt/traefik
+          register: traefik_up
           changed_when: true
+          failed_when: false
+
+        - name: Fail with the full Traefik startup error, if any
+          ansible.builtin.fail:
+            msg: "Traefik failed to start (rc={{ traefik_up.rc }}):\n{{ traefik_up.stderr }}"
+          when: traefik_up.rc != 0
 
     - name: Deploy each requested app
       ansible.builtin.include_tasks: install_docker_app_block.yml

@@ -44,7 +44,19 @@
   no_log: "{{ docker_app.name == 'wordpress' }}"
 
 - name: Start {{ docker_app.name }}
-  ansible.builtin.command: docker compose up -d
+  # --quiet-pull suppresses per-layer pull progress, which can run to
+  # megabytes of output and get truncated by AWX's log display, burying the
+  # actual error underneath it. Captured explicitly and re-raised below so
+  # the real failure is always fully visible in the job output itself - no
+  # need to SSH in and look for it.
+  ansible.builtin.command: docker compose up -d --quiet-pull
   args:
     chdir: "/opt/{{ docker_app.name }}"
+  register: docker_app_up
   changed_when: true
+  failed_when: false
+
+- name: Fail with the full {{ docker_app.name }} startup error, if any
+  ansible.builtin.fail:
+    msg: "{{ docker_app.name }} failed to start (rc={{ docker_app_up.rc }}):\n{{ docker_app_up.stderr }}"
+  when: docker_app_up.rc != 0
