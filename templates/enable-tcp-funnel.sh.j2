@@ -34,7 +34,18 @@ for i in {1..2880}; do
         sleep 30
         continue
     fi
-    echo "[$(date -Is)] ERROR: tailscale funnel --tls-terminated-tcp failed for a reason other than pending approval:"
+    # Funnel config is tied to this VM's tailscale identity, not to any one
+    # Docker container - a port left in a different mode by an earlier
+    # deployment/manual test survives container recreation. Detect that
+    # exact conflict and clear it automatically instead of failing, since a
+    # human isn't meant to have to intervene here.
+    OLD_MODE="$(grep -oP 'is already serving "\K[^"]+' "$ERR_FILE" || true)"
+    if [ -n "$OLD_MODE" ]; then
+        echo "[$(date -Is)] Port $FUNNEL_PORT was left in '$OLD_MODE' mode by an earlier run - clearing it and retrying..."
+        tailscale funnel "--$OLD_MODE=$FUNNEL_PORT" off || true
+        continue
+    fi
+    echo "[$(date -Is)] ERROR: tailscale funnel --tls-terminated-tcp failed for a reason other than pending approval or a mode conflict:"
     cat "$ERR_FILE"
     rm -f "$ERR_FILE"
     exit 1
