@@ -42,9 +42,9 @@ services:
     labels:
       - "traefik.enable=true"
 {% if path_prefix == '/' %}
-      - "traefik.http.routers.wordpress.rule=Host(`{{ app_hostname }}`)"
+      - "traefik.http.routers.wordpress.rule=PathPrefix(`/`)"
 {% else %}
-      - "traefik.http.routers.wordpress.rule=Host(`{{ app_hostname }}`) && PathPrefix(`{{ path_prefix }}`)"
+      - "traefik.http.routers.wordpress.rule=PathPrefix(`{{ path_prefix }}`)"
       - "traefik.http.middlewares.wordpress-stripprefix.stripprefix.prefixes={{ path_prefix }}"
       - "traefik.http.routers.wordpress.middlewares=wordpress-stripprefix"
 {% endif %}

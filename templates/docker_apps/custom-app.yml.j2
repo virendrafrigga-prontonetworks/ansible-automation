@@ -24,9 +24,9 @@ services:
     labels:
       - "traefik.enable=true"
 {% if path_prefix == '/' %}
-      - "traefik.http.routers.{{ app_name }}.rule=Host(`{{ app_hostname }}`)"
+      - "traefik.http.routers.{{ app_name }}.rule=PathPrefix(`/`)"
 {% else %}
-      - "traefik.http.routers.{{ app_name }}.rule=Host(`{{ app_hostname }}`) && PathPrefix(`{{ path_prefix }}`)"
+      - "traefik.http.routers.{{ app_name }}.rule=PathPrefix(`{{ path_prefix }}`)"
       - "traefik.http.middlewares.{{ app_name }}-stripprefix.stripprefix.prefixes={{ path_prefix }}"
       - "traefik.http.routers.{{ app_name }}.middlewares={{ app_name }}-stripprefix"
 {% endif %}

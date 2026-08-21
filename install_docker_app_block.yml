@@ -1,7 +1,7 @@
 # Included (not run directly) with docker_app (loop var: {name, path_prefix,
 # and optionally image/port/expose_http for a custom app not in the
-# catalog}), docker_app_catalog, app_hostname, wordpress_db_password already
-# set by the caller.
+# catalog}), docker_app_catalog, wordpress_db_password already set by the
+# caller.
 
 - name: Ensure app directory exists for {{ docker_app.name }}
   ansible.builtin.file:

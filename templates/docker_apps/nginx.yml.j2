@@ -16,12 +16,15 @@ services:
     labels:
       - "traefik.enable=true"
 {% if path_prefix == '/' %}
-      # Root app: plain Host rule, no PathPrefix/stripPrefix - Traefik gives
-      # this lower priority than any other app's more specific PathPrefix
+      # Root app: matches everything as a fallback - no Host() matcher, since
+      # this VM's Traefik only ever receives traffic meant for it regardless
+      # of which hostname reached it (tailnet short name, full FQDN, or the
+      # public Funnel URL - all the same VM, no virtual-hosting needed).
+      # Traefik gives this lower priority than any more specific PathPrefix
       # rule automatically, so it acts as the catch-all/homepage.
-      - "traefik.http.routers.nginx.rule=Host(`{{ app_hostname }}`)"
+      - "traefik.http.routers.nginx.rule=PathPrefix(`/`)"
 {% else %}
-      - "traefik.http.routers.nginx.rule=Host(`{{ app_hostname }}`) && PathPrefix(`{{ path_prefix }}`)"
+      - "traefik.http.routers.nginx.rule=PathPrefix(`{{ path_prefix }}`)"
       - "traefik.http.middlewares.nginx-stripprefix.stripprefix.prefixes={{ path_prefix }}"
       - "traefik.http.routers.nginx.middlewares=nginx-stripprefix"
 {% endif %}

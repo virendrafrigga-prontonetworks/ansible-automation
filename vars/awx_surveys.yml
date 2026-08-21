@@ -70,12 +70,6 @@ install_docker_app_survey:
       type: text
       variable: target_host
       required: true
-    - question_name: "App Hostname"
-      question_description: "Host() Traefik should route for these apps - defaults to target_host if left blank"
-      type: text
-      variable: app_hostname
-      required: false
-      default: ""
     - question_name: "WordPress DB Password"
       question_description: "Only used when wordpress is one of the docker_apps"
       type: password

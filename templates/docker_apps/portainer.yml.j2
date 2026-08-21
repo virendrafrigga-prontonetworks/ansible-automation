@@ -22,9 +22,9 @@ services:
     labels:
       - "traefik.enable=true"
 {% if path_prefix == '/' %}
-      - "traefik.http.routers.portainer.rule=Host(`{{ app_hostname }}`)"
+      - "traefik.http.routers.portainer.rule=PathPrefix(`/`)"
 {% else %}
-      - "traefik.http.routers.portainer.rule=Host(`{{ app_hostname }}`) && PathPrefix(`{{ path_prefix }}`)"
+      - "traefik.http.routers.portainer.rule=PathPrefix(`{{ path_prefix }}`)"
       - "traefik.http.middlewares.portainer-stripprefix.stripprefix.prefixes={{ path_prefix }}"
       - "traefik.http.routers.portainer.middlewares=portainer-stripprefix"
 {% endif %}

@@ -35,7 +35,6 @@
     docker_apps:
       - name: nginx
         path_prefix: "/"
-    app_hostname: "{{ target_host }}"          # From AWX Survey - Host() the apps should answer to behind Traefik
     wordpress_db_password: ""                  # From AWX Survey/Vault - required when wordpress is in docker_apps
     # Private by default - only expose to the real internet if explicitly asked.
     # Everything here goes through Traefik on 80/443, so this doesn't need to
@@ -143,7 +142,8 @@
     - name: Show access instructions
       ansible.builtin.debug:
         msg: >-
-          Deployed on {{ target_host }} behind Traefik (Host `{{ app_hostname }}`, ports 80/443):
+          Deployed on {{ target_host }} behind Traefik (ports 80/443, routed by path - reachable via the tailnet
+          hostname, tailnet IP, or public Funnel URL alike):
           {% for a in docker_apps %}{% set is_http = a.expose_http | default(docker_app_catalog[a.name].expose_http if a.name in docker_app_catalog else true) %}{{ a.name }}{{ ' at path ' ~ (a.path_prefix | default('/')) if is_http else ' (internal-only, no path/Funnel access)' }}{{ ', ' if not loop.last else '' }}{% endfor %}.
           {{ ('A background script on ' ~ target_host ~ ' is waiting for tailnet admin approval, then will expose it '
               ~ 'at https://' ~ target_host ~ '.<your-tailnet>.ts.net - check /var/log/tailscale-funnel.log there for status.')
