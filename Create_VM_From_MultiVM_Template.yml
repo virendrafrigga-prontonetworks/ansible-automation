@@ -29,6 +29,12 @@
     tailscale_tag: "tag:vm-provisioned"
     vm_ssh_public_key: "{{ lookup('file', playbook_dir + '/id_rsa.pub') }}"
 
+    # Private by default - only expose to the real internet if explicitly
+    # asked. Handled here (not left to a separate Expose_App_To_Internet.yml
+    # run) so a single job creates a publicly-reachable VM in one shot.
+    expose_to_internet: false                # From AWX Survey
+    expose_port: 80                          # From AWX Survey
+
   tasks:
     - name: Ensure the requested OS template exists
       ansible.builtin.include_tasks: create_template_block.yml
@@ -116,6 +122,46 @@
       register: tailnet_reachability
       ignore_errors: true
 
+    - name: Expose this VM to the public internet via Tailscale Funnel
+      # Private by default. Only runs when explicitly requested. Approval can
+      # take anywhere from seconds to days, so this doesn't wait or fail on
+      # it here - it hands off to a detached script running inside the VM
+      # that polls until approved, then enables Funnel on its own (same
+      # script/behavior as Install_Docker_And_App.yml and Create_LXC_App.yml).
+      # Delivered via 'qm guest exec', not SSH: this playbook only has
+      # Proxmox-host access at this point, and the VM may not be
+      # tailnet-reachable yet (that's exactly the approval wait above) - the
+      # QEMU guest agent works over the hypervisor channel regardless of
+      # tailnet/network state, so it doesn't need to wait for either.
+      when: expose_to_internet | bool
+      block:
+        - name: Render the Tailscale Funnel enable script content
+          ansible.builtin.set_fact:
+            funnel_enable_script: "{{ lookup('template', playbook_dir + '/templates/enable-funnel.sh.j2') }}"
+          vars:
+            tailscale_hostname: "{{ vm_name }}"
+
+        - name: Wait for the QEMU guest agent to be ready inside the VM
+          ansible.builtin.command: qm guest cmd {{ new_vmid }} ping
+          register: guest_agent_ping
+          until: guest_agent_ping.rc == 0
+          retries: 30
+          delay: 10
+          changed_when: false
+
+        - name: Push the Funnel enable script into the VM via the guest agent
+          # No direct equivalent of `pct push` for VMs - base64 the content
+          # and decode it on the other side of a single `qm guest exec` call.
+          ansible.builtin.command: >-
+            qm guest exec {{ new_vmid }} -- bash -c
+            "echo {{ funnel_enable_script | b64encode }} | base64 -d > /usr/local/bin/enable-funnel.sh && chmod 700 /usr/local/bin/enable-funnel.sh"
+          changed_when: true
+
+        - name: Start the Funnel enable script inside the VM as a detached systemd unit
+          ansible.builtin.command: >-
+            qm guest exec {{ new_vmid }} -- systemd-run --unit=enable-funnel --collect --no-block /usr/local/bin/enable-funnel.sh
+          changed_when: true
+
     - name: Show result
       ansible.builtin.debug:
         msg: >-
@@ -126,3 +172,8 @@
              else 'Not yet confirmed reachable over the tailnet - most likely still pending manual approval in '
                   ~ 'your Tailscale admin console (see complete_project_guide.txt step 2). Approve it there; '
                   ~ 'no need to re-run this job once approved, just proceed to Install Docker/LXC whenever ready.' }}
+          {{ ('A background script on ' ~ vm_name ~ ' is waiting for tailnet admin approval, then will expose it '
+              ~ 'at https://' ~ vm_name ~ '.<your-tailnet>.ts.net - check /var/log/tailscale-funnel.log there for status.')
+             if (expose_to_internet | bool)
+             else ('Private - reachable only over the tailnet at ' ~ vm_name ~ ' (or its tailnet IP).'
+                   ~ ' Re-run this job with expose_to_internet=true if you want it public.') }}
