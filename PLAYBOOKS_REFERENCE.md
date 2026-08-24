@@ -6,10 +6,10 @@ There are **7 playbooks** in three groups:
 
 | Group | Playbook | Purpose |
 |---|---|---|
-| Create | `Create_VM_From_MultiVM_Template.yml` | Create a VM on Proxmox, join it to the tailnet |
-| Create | `Create_LXC_App.yml` | Create an LXC container directly on Proxmox, join it to the tailnet |
+| Create | `Create_VM_From_MultiVM_Template.yml` | Create a VM on Proxmox, join it to the tailnet, optionally expose it publicly in the same run |
+| Create | `Create_LXC_App.yml` | Create an LXC container directly on Proxmox, join it to the tailnet, optionally expose it publicly in the same run |
 | Create | `Install_Docker_And_App.yml` | Install Docker on an existing VM and deploy one or more containers on it |
-| Expose | `Expose_App_To_Internet.yml` | Make an already-running service on a VM reachable from the public internet |
+| Expose | `Expose_App_To_Internet.yml` | Make an already-running service on a VM reachable from the public internet, without redeploying anything else |
 | Delete | `Delete_VM.yml` | Destroy a VM (and its underlying template, if you pass a template name) |
 | Delete | `Delete_LXC.yml` | Destroy an LXC container |
 | Delete | `Delete_Docker_App.yml` | Remove one or more Docker apps from a VM, leaving Traefik and other apps running |
@@ -79,6 +79,8 @@ Ensures the requested OS template exists on Proxmox (builds it on first use, reu
 | `bridge` | string | no | `"vmbr0"` | Proxmox network bridge |
 | `tailscale_authkey` | string (secret) | yes | — | **Injected via the Tailscale Auth Key credential, not sent by the UI directly** |
 | `tailscale_tag` | string | no | `"tag:vm-provisioned"` | Tailscale ACL tag applied at join time |
+| `expose_to_internet` | boolean | no | `false` | If true, exposes `expose_port` on this VM publicly via Tailscale Funnel, once approved — one job creates **and** exposes it, no separate step needed |
+| `expose_port` | integer | no | `80` | Local port to expose when `expose_to_internet` is true |
 
 ### Example `extra_vars`
 
@@ -91,7 +93,9 @@ Ensures the requested OS template exists on Proxmox (builds it on first use, reu
   "cores": 2,
   "disk_size": "15G",
   "storage": "local-lvm",
-  "bridge": "vmbr0"
+  "bridge": "vmbr0",
+  "expose_to_internet": false,
+  "expose_port": 80
 }
 ```
 (`tailscale_authkey` is not included here — it comes from the attached Credential, not from UI input.)
@@ -100,6 +104,7 @@ Ensures the requested OS template exists on Proxmox (builds it on first use, reu
 
 - Joining the tailnet requires a one-time manual approval in the Tailscale admin console (unless auto-approval / device-approval-off is configured tailnet-wide) — the job itself finishes quickly regardless of whether approval has happened yet; it does **not** block waiting for it.
 - The job's final message tells you whether the VM was already reachable over Tailscale SSH at the time the job finished. If not, that's expected and not a failure — just means approval is still pending.
+- If `expose_to_internet: true`, exposure is handled the same detached-background-script way as the other playbooks (delivered via the QEMU guest agent, not SSH, since the VM may not be tailnet-reachable yet at this point) — check `/var/log/tailscale-funnel.log` inside the VM for status. Nothing needs to be run separately for this to happen.
 - `os_type` is deliberately limited to Ubuntu/Debian — RHEL-family images (CentOS/Rocky/AlmaLinux) were tried and removed due to unresolved boot/cloud-init issues on this Proxmox host.
 
 ---
@@ -250,7 +255,9 @@ This publishes the port to all of the VM's interfaces (reachable by anything on 
 
 ## 5. Expose App To Internet — `Expose_App_To_Internet.yml`
 
-A standalone playbook for exposing something on a VM that *wasn't* deployed via `Install_Docker_And_App.yml` — e.g. a manually-installed `apt` package, or a raw port a developer wants exposed without going through the full Docker Apps schema. Purely additive: it doesn't know or care how the target port got a listener.
+A standalone playbook for exposing something on a VM *after the fact* — e.g. a manually-installed `apt` package, an app added outside `Install_Docker_And_App.yml`'s schema, or an app on a VM that was created without `expose_to_internet: true` at the time. Purely additive: it doesn't know or care how the target port got a listener.
+
+Note: as of the `expose_to_internet` addition to Create VM/Create LXC, this playbook is **no longer needed for the common case** of "expose a VM right after creating it" — that's now handled in one job. It's still the right tool for exposing something added to an already-running VM later, or for a VM/LXC that was deliberately created private and only later needs to go public.
 
 **Connects to:** the target VM directly over SSH.
 
@@ -376,3 +383,5 @@ RHEL-family images (CentOS Stream 9, Rocky 9, AlmaLinux 9) are intentionally not
 - **`tcp_funnel_port` requires real authentication.** The UI should not let a user set `tcp_funnel_port` on a database entry without also requiring a `command`/`environment` field that sets a password — there is no other protection layer.
 - **Password characters in connection strings**: if a user-supplied password contains `@`, `:`, or other URI-special characters, any connection string the UI generates for MongoDB (or similar `scheme://user:pass@host` formats) must URL-encode the password (`@` → `%40`, etc.) or the connection string will fail to parse.
 - **Job Template "Prompt on Launch"** must be enabled for Variables on every template the UI calls — this was a real, repeated source of confusion during manual testing (edits at launch time were silently ignored otherwise).
+- **`expose_to_internet` on Create VM depends on the QEMU guest agent starting up inside the new VM** (it's delivered via `qm guest exec`, not SSH, since the VM may not be tailnet-reachable yet). The job waits up to 5 minutes for the guest agent before giving up — on a very slow-booting VM this could still be tight; if you ever see this specific step fail, it's almost always the guest agent not being ready in time, not a real Funnel/Tailscale problem.
+- **No dynamic inventory today.** Every playbook target (`vm_name`, `ct_name`, `target_host`) is a name the caller must already know — there's no live "list of VMs that currently exist" the UI can query from AWX itself. This is planned as a separate follow-up (likely an AWX Inventory Source using the `community.general.proxmox` plugin), not something covered by anything in this document yet.
