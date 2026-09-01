@@ -6,11 +6,15 @@
 
   vars:
     local_cache_dir: "{{ playbook_dir }}/.image_cache"
-    storage: "local-lvm"                  # From AWX Survey - block storage for the container's rootfs
-    # Container *templates* (vztmpl content) need a storage with that content type
-    # enabled - almost always "local" (directory storage), NOT local-lvm/block
-    # storage, which only supports disk images. Separate var from `storage` on purpose.
-    template_storage: "local"             # From AWX Survey
+    # Leave blank (default) to auto-detect from this host - picks the first
+    # active storage that actually supports the content type needed.
+    # Confirmed live: hardcoding "local-lvm" broke outright on a host that
+    # only has "local" - not every Proxmox host has the same storage
+    # layout, and the caller shouldn't have to already know this host's
+    # specific setup just to launch a container. Only set these explicitly
+    # if a host has multiple valid options and you need a non-default one.
+    storage: ""                           # From AWX Survey - block storage for the container's rootfs
+    template_storage: ""                  # From AWX Survey - storage for the LXC template file (vztmpl content)
     bridge: "vmbr0"                        # From AWX Survey
     os_template: "ubuntu-24.04-standard"    # From AWX Survey - Proxmox LXC template name (no version/arch suffix)
     ct_name: "app-lxc01"                    # From AWX Survey
@@ -91,6 +95,56 @@
       debian-12-standard: { distro: debian, codename: bookworm }
 
   tasks:
+    - name: Auto-detect rootfs storage on this host, if not explicitly set
+      # Not every Proxmox host has local-lvm - some only have a plain
+      # "local" dir storage (confirmed live). Ask the host itself what's
+      # actually available and enabled for LXC rootfs, rather than
+      # requiring the caller to already know this host's specific layout.
+      when: storage | length == 0
+      block:
+        - name: List active storages on this host that support LXC rootfs
+          ansible.builtin.shell: |
+            set -o pipefail
+            pvesm status --content rootdir --enabled 1 | awk 'NR>1 {print $1}'
+          args:
+            executable: /bin/bash
+          register: rootfs_storages
+          changed_when: false
+
+        - name: Fail clearly if no rootfs-capable storage was found
+          ansible.builtin.fail:
+            msg: >-
+              No active storage on this Proxmox host supports LXC rootfs (content type
+              'rootdir') - pass 'storage' explicitly, or check 'pvesm status' on the host.
+          when: rootfs_storages.stdout_lines | length == 0
+
+        - name: Set auto-detected rootfs storage
+          ansible.builtin.set_fact:
+            storage: "{{ rootfs_storages.stdout_lines | first }}"
+
+    - name: Auto-detect template storage on this host, if not explicitly set
+      when: template_storage | length == 0
+      block:
+        - name: List active storages on this host that support LXC templates
+          ansible.builtin.shell: |
+            set -o pipefail
+            pvesm status --content vztmpl --enabled 1 | awk 'NR>1 {print $1}'
+          args:
+            executable: /bin/bash
+          register: vztmpl_storages
+          changed_when: false
+
+        - name: Fail clearly if no template-capable storage was found
+          ansible.builtin.fail:
+            msg: >-
+              No active storage on this Proxmox host supports LXC templates (content type
+              'vztmpl') - pass 'template_storage' explicitly, or check 'pvesm status' on the host.
+          when: vztmpl_storages.stdout_lines | length == 0
+
+        - name: Set auto-detected template storage
+          ansible.builtin.set_fact:
+            template_storage: "{{ vztmpl_storages.stdout_lines | first }}"
+
     - name: Fail clearly if ct_ip is set without ct_gateway (or vice versa)
       ansible.builtin.fail:
         msg: >-

@@ -11,7 +11,14 @@
     proxmox_host: "{{ inventory_hostname }}"
     iso_dir: "/var/lib/vz/template/iso"
     local_cache_dir: "{{ playbook_dir }}/.image_cache"
-    storage: "local-lvm"                 # From AWX Survey
+    # Leave blank (default) to auto-detect from this host - picks the first
+    # active storage that supports VM disk images. Confirmed live on a
+    # different host: hardcoding "local-lvm" broke outright on a host that
+    # only has "local" - not every Proxmox host has the same storage
+    # layout, and the caller shouldn't have to already know this host's
+    # specific setup just to launch a VM. Only set this explicitly if a
+    # host has multiple valid options and you need a non-default one.
+    storage: ""                          # From AWX Survey
     bridge: "vmbr0"                       # From AWX Survey
 
     os_type: "ubuntu-24.04"               # From AWX Survey - any key from vars/os_images.yml (ubuntu-24.04 | ubuntu-22.04 | debian-12)
@@ -36,6 +43,29 @@
     expose_port: 80                          # From AWX Survey
 
   tasks:
+    - name: Auto-detect VM disk storage on this host, if not explicitly set
+      when: storage | length == 0
+      block:
+        - name: List active storages on this host that support VM disk images
+          ansible.builtin.shell: |
+            set -o pipefail
+            pvesm status --content images --enabled 1 | awk 'NR>1 {print $1}'
+          args:
+            executable: /bin/bash
+          register: image_storages
+          changed_when: false
+
+        - name: Fail clearly if no image-capable storage was found
+          ansible.builtin.fail:
+            msg: >-
+              No active storage on this Proxmox host supports VM disk images (content type
+              'images') - pass 'storage' explicitly, or check 'pvesm status' on the host.
+          when: image_storages.stdout_lines | length == 0
+
+        - name: Set auto-detected VM disk storage
+          ansible.builtin.set_fact:
+            storage: "{{ image_storages.stdout_lines | first }}"
+
     - name: Ensure the requested OS template exists
       ansible.builtin.include_tasks: create_template_block.yml
 

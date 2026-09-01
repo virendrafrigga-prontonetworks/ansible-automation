@@ -16,6 +16,8 @@ There are **7 playbooks** in three groups:
 
 All of them are idempotent by name — re-running a create playbook with the same name reuses/updates the existing resource instead of creating a duplicate; re-running a delete playbook against a name that doesn't exist is a harmless no-op.
 
+**Design principle: simple by default, capable when asked.** Each Create playbook's variables below are split into **Simple** (what a basic UI form needs — a handful of fields, sensible defaults) and **Advanced** (optional power-user knobs, left blank/default for the common case). Anything the playbook can determine by asking the Proxmox host itself — target architecture (amd64/arm64), storage backend availability — is auto-detected and never asked of the caller. Build the UI's default form from the Simple tables only; put Advanced fields behind a collapsed "Advanced" section, not the main flow.
+
 ---
 
 ## 1. How to launch these from a web UI (AWX REST API)
@@ -65,22 +67,27 @@ Ensures the requested OS template exists on Proxmox (builds it on first use, reu
 
 **Connects to:** the Proxmox host directly (`qm`, `pvesh` commands).
 
-### Variables
+### Simple — the UI's default form should only need these
 
 | Variable | Type | Required | Default | Description |
 |---|---|---|---|---|
 | `os_type` | string (enum) | yes | `"ubuntu-24.04"` | One of: `ubuntu-24.04`, `ubuntu-22.04`, `debian-12` |
 | `vm_name` | string | yes | `"dev-vm01"` | The VM's name and its tailnet hostname |
-| `vm_user` | string | no | `"pronto"` | Login user baked into the VM via cloud-init |
 | `memory` | integer | no | `2048` | RAM in MB |
 | `cores` | integer | no | `2` | CPU cores |
 | `disk_size` | string | no | `"15G"` | Disk size, Proxmox `qm resize` format (a number + `G`) |
-| `storage` | string | no | `"local-lvm"` | Proxmox storage backend for the VM's disk |
-| `bridge` | string | no | `"vmbr0"` | Proxmox network bridge |
-| `tailscale_authkey` | string (secret) | yes | — | **Injected via the Tailscale Auth Key credential, not sent by the UI directly** |
-| `tailscale_tag` | string | no | `"tag:vm-provisioned"` | Tailscale ACL tag applied at join time |
 | `expose_to_internet` | boolean | no | `false` | If true, exposes `expose_port` on this VM publicly via Tailscale Funnel, once approved — one job creates **and** exposes it, no separate step needed |
 | `expose_port` | integer | no | `80` | Local port to expose when `expose_to_internet` is true |
+| `tailscale_authkey` | string (secret) | yes | — | **Injected via the Tailscale Auth Key credential, not sent by the UI directly** |
+
+### Advanced — leave blank/default unless you specifically need to override them
+
+| Variable | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `storage` | string | no | `""` (auto-detect) | Proxmox storage backend for the VM's disk. Blank auto-detects the first active storage on the host that supports VM disk images (`pvesm status --content images`) — only set this if a host has more than one valid option and you need a non-default one. |
+| `bridge` | string | no | `"vmbr0"` | Proxmox network bridge |
+| `vm_user` | string | no | `"pronto"` | Login user baked into the VM via cloud-init |
+| `tailscale_tag` | string | no | `"tag:vm-provisioned"` | Tailscale ACL tag applied at join time |
 
 ### Example `extra_vars`
 
@@ -88,17 +95,14 @@ Ensures the requested OS template exists on Proxmox (builds it on first use, reu
 {
   "os_type": "ubuntu-24.04",
   "vm_name": "app-vm-01",
-  "vm_user": "pronto",
   "memory": 2048,
   "cores": 2,
   "disk_size": "15G",
-  "storage": "local-lvm",
-  "bridge": "vmbr0",
   "expose_to_internet": false,
   "expose_port": 80
 }
 ```
-(`tailscale_authkey` is not included here — it comes from the attached Credential, not from UI input.)
+(`tailscale_authkey` is not included here — it comes from the attached Credential, not from UI input. `storage`/`bridge`/`vm_user`/`tailscale_tag` are omitted here since their defaults/auto-detection cover the normal case — add them only when overriding.)
 
 ### Behavior / things the UI should communicate to the user
 
@@ -106,6 +110,7 @@ Ensures the requested OS template exists on Proxmox (builds it on first use, reu
 - The job's final message tells you whether the VM was already reachable over Tailscale SSH at the time the job finished. If not, that's expected and not a failure — just means approval is still pending.
 - If `expose_to_internet: true`, exposure is handled the same detached-background-script way as the other playbooks (delivered via the QEMU guest agent, not SSH, since the VM may not be tailnet-reachable yet at this point) — check `/var/log/tailscale-funnel.log` inside the VM for status. Nothing needs to be run separately for this to happen.
 - `os_type` is deliberately limited to Ubuntu/Debian — RHEL-family images (CentOS/Rocky/AlmaLinux) were tried and removed due to unresolved boot/cloud-init issues on this Proxmox host.
+- `storage` auto-detects from the host by default — the caller never needs to know that specific host's storage layout (some hosts have `local-lvm`, some only have `local`, etc.) just to launch a VM.
 
 ---
 
@@ -115,50 +120,66 @@ Creates an LXC container directly on Proxmox (no VM layer), installs a chosen ap
 
 **Connects to:** the Proxmox host directly (`pct`, `pveam`, `pvesh` commands).
 
-### Variables
+### Simple — the UI's default form should only need these
 
 | Variable | Type | Required | Default | Description |
 |---|---|---|---|---|
 | `ct_name` | string | yes | `"app-lxc01"` | Container name and tailnet hostname |
-| `os_template` | string | no | `"ubuntu-24.04-standard"` | Proxmox LXC appliance template name (no version/arch suffix) |
+| `app_choice` | string | no | `"nginx"` | Apt package to install (e.g. `nginx`, `redis`, `postgresql`). See Advanced below for apps that need a custom installer instead. |
 | `memory` | integer | no | `1024` | RAM in MB |
 | `cores` | integer | no | `1` | CPU cores |
 | `ct_disk_gb` | integer | no | `8` | Root filesystem size in GB (plain number, no unit suffix) |
-| `storage` | string | no | `"local-lvm"` | Block storage for the container's rootfs |
-| `template_storage` | string | no | `"local"` | Storage used for the LXC template file itself — must support the `vztmpl` content type (`local-lvm` does **not**) |
+| `expose_to_internet` | boolean | no | `false` | If true, exposes `expose_port` publicly via Tailscale Funnel once approved |
+| `expose_port` | integer | no | `80` | Local port to expose when `expose_to_internet` is true |
+| `tailscale_authkey` | string (secret) | yes | — | Injected via the Tailscale Auth Key credential |
+
+### Advanced — leave blank/default unless you specifically need to override them
+
+| Variable | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `os_template` | string | no | `"ubuntu-24.04-standard"` | Proxmox LXC appliance template name (no version/arch suffix) |
+| `storage` | string | no | `""` (auto-detect) | Block storage for the container's rootfs. Blank auto-detects the first active storage on the host supporting `rootdir` content — only override on a host with multiple valid options. |
+| `template_storage` | string | no | `""` (auto-detect) | Storage for the LXC template file. Blank auto-detects the first active storage supporting `vztmpl` content. |
 | `bridge` | string | no | `"vmbr0"` | Proxmox network bridge |
 | `ct_nameserver` | string | no | `"1.1.1.1"` | DNS resolver (unprivileged LXC containers don't reliably get DNS via DHCP) |
 | `ct_ip` | string | no | `""` | Leave blank for DHCP (default). Set to a static CIDR (e.g. `"192.168.1.50/24"`) to bypass DHCP entirely — use this when a host's DHCP pool is exhausted/unreliable. Must be set together with `ct_gateway`. |
 | `ct_gateway` | string | no | `""` | Gateway IP for the subnet in `ct_ip`. Required together with `ct_ip`; the job fails fast with a clear message if only one of the two is set. |
-| `app_choice` | string | no | `"nginx"` | Label used for logging/messages, and — only when `app_install_script` is blank — also the apt package name to install |
-| `app_install_script` | string | no | `""` | Blank installs `app_choice` as an apt package (e.g. `nginx`). Set this to override with any shell command for apps that need their own installer instead of apt, e.g. Ollama: `"curl -fsSL https://ollama.com/install.sh \| sh"` |
+| `app_install_script` | string | no | `""` | Overrides `app_choice`'s apt install with any shell command, for apps that need their own installer — e.g. Ollama: `"curl -fsSL https://ollama.com/install.sh \| sh"` |
 | `app_post_install_script` | string | no | `""` | Optional shell command that runs once, after install, regardless of which method above was used — e.g. `"ollama pull llama3.2:1b"` |
 | `gpu_passthrough` | boolean | no | `false` | Passes the Proxmox host's Mali GPU (`/dev/mali0`) and DRM render nodes (`/dev/dri`) into the container, if present — detected automatically each run, skipped harmlessly (with a warning in the job output) on a host with neither. Currently Mali/DRM-only (ARM/CIX hosts); NVIDIA/AMD passthrough isn't implemented. Getting the device into the container is not the same as Ollama being able to use it for acceleration — that also needs a matching Mali userspace Vulkan driver inside the container, which this does not install. |
-| `tailscale_authkey` | string (secret) | yes | — | Injected via the Tailscale Auth Key credential |
 | `tailscale_tag` | string | no | `"tag:lxc-host"` | Tailscale ACL tag applied at join time |
-| `expose_to_internet` | boolean | no | `false` | If true, exposes `expose_port` publicly via Tailscale Funnel once approved |
-| `expose_port` | integer | no | `80` | Local port to expose when `expose_to_internet` is true |
 
-### Example `extra_vars`
+### Example `extra_vars` — simple case (plain nginx)
 
 ```json
 {
   "ct_name": "app-lxc-01",
-  "os_template": "ubuntu-24.04-standard",
+  "app_choice": "nginx",
   "memory": 1024,
   "cores": 1,
   "ct_disk_gb": 8,
-  "storage": "local-lvm",
-  "template_storage": "local",
-  "bridge": "vmbr0",
-  "app_choice": "nginx",
-  "app_install_script": "",
-  "app_post_install_script": "",
-  "gpu_passthrough": false,
-  "ct_ip": "",
-  "ct_gateway": "",
   "expose_to_internet": false,
   "expose_port": 80
+}
+```
+(`storage`/`template_storage`/`bridge` etc. are omitted — auto-detection and defaults cover the normal case.)
+
+### Example `extra_vars` — advanced case (Ollama with GPU passthrough and a static IP)
+
+```json
+{
+  "ct_name": "ollama-gpu-lxc01",
+  "memory": 4096,
+  "cores": 4,
+  "ct_disk_gb": 20,
+  "app_choice": "ollama",
+  "app_install_script": "apt-get install -y zstd && curl -fsSL https://ollama.com/install.sh | sh",
+  "app_post_install_script": "ollama pull llama3.2:1b",
+  "gpu_passthrough": true,
+  "ct_ip": "192.168.1.60/24",
+  "ct_gateway": "192.168.1.1",
+  "expose_to_internet": false,
+  "expose_port": 11434
 }
 ```
 
@@ -172,6 +193,7 @@ Creates an LXC container directly on Proxmox (no VM layer), installs a chosen ap
 - **Idempotent by `ct_name`** (matching Create VM's behavior): if a container with that name already exists, this job skips template staging/creation entirely and reuses it — it only re-checks tailnet reachability and (re-)applies `expose_to_internet`. This is the intended way to make an already-running container public later: re-launch with the same `ct_name` and `expose_to_internet: true`, don't create a second container.
 - If a container reuses an existing `ct_name`/ctid combination from a prior *failed* run, it's reused as-is — the idempotency check only confirms the name exists, not that creation finished successfully. If a job fails partway through, destroy that container (`pct stop <ctid> && pct destroy <ctid>`) before relaunching with the same name, rather than assuming a retry will fix a half-created container.
 - `ct_ip`/`ct_gateway` bypass DHCP with a static IP, entirely via variables — no manual `pct set`/host editing ever needed. Use this if a host's DHCP pool turns out to be exhausted or unreliable (confirmed live: a container's DHCP requests reached the bridge fine but got zero responses because the router's pool was full — nothing wrong on the Proxmox/container side, just no free lease to hand out).
+- `storage`/`template_storage` auto-detect from the host by default — the caller never needs to know that specific host's storage layout (some hosts have `local-lvm`, some only have `local`, etc.) just to launch a container.
 
 ---
 
