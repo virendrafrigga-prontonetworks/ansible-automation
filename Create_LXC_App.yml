@@ -40,16 +40,25 @@
       ollama:
         install_script: "apt-get install -y zstd && curl -fsSL https://ollama.com/install.sh | sh"
         # Ollama's server rejects requests whose Host header it doesn't
-        # recognize by default (anti-DNS-rebinding protection) - confirmed
-        # live: Tailscale Funnel proxying correctly to 127.0.0.1:11434
-        # still got a 403 from Ollama itself because the Host header was
-        # the funnel hostname, not localhost. OLLAMA_ORIGINS=* is required
-        # for it to be reachable through any reverse proxy/tunnel at all,
-        # not just Tailscale - set unconditionally so this app never needs
-        # a follow-up manual fix regardless of how it's exposed.
+        # recognize whenever it's bound to localhost (anti-DNS-rebinding
+        # protection) - confirmed live: Tailscale Funnel proxying correctly
+        # to 127.0.0.1:11434 still got a 403 from Ollama itself because the
+        # Host header was the funnel hostname, not localhost.
+        # OLLAMA_ORIGINS alone does NOT fix this (that's for browser CORS
+        # Origin headers, a different check) - confirmed live it was
+        # applied correctly and still got 403. The actual fix is binding
+        # to 0.0.0.0 instead of localhost, which bypasses this Host check
+        # entirely (this is Ollama's own documented behavior difference,
+        # not a bug in our config). Trade-off worth knowing: this also
+        # means Ollama is directly reachable on port 11434 by anything
+        # that can reach this container's LAN/tailnet IP, not just through
+        # Funnel's TLS-fronted URL - fine given Ollama already has no
+        # built-in auth regardless of exposure method (see expose_to_internet
+        # caveats elsewhere), but worth knowing this widens reachability
+        # slightly beyond "only via the public funnel URL."
         post_install_script: >-
           mkdir -p /etc/systemd/system/ollama.service.d &&
-          printf '[Service]\nEnvironment=OLLAMA_ORIGINS=*\n' > /etc/systemd/system/ollama.service.d/override.conf &&
+          printf '[Service]\nEnvironment=OLLAMA_HOST=0.0.0.0:11434\nEnvironment=OLLAMA_ORIGINS=*\n' > /etc/systemd/system/ollama.service.d/override.conf &&
           systemctl daemon-reload && systemctl restart ollama && sleep 2 && ollama pull llama3.2:1b
         default_port: 11434
 
