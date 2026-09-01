@@ -128,7 +128,9 @@ Creates an LXC container directly on Proxmox (no VM layer), installs a chosen ap
 | `template_storage` | string | no | `"local"` | Storage used for the LXC template file itself — must support the `vztmpl` content type (`local-lvm` does **not**) |
 | `bridge` | string | no | `"vmbr0"` | Proxmox network bridge |
 | `ct_nameserver` | string | no | `"1.1.1.1"` | DNS resolver (unprivileged LXC containers don't reliably get DNS via DHCP) |
-| `app_choice` | string | no | `"nginx"` | App installed via `apt-get install` inside the container — only `nginx` is a proven/supported value today |
+| `app_choice` | string | no | `"nginx"` | Label used for logging/messages, and — only when `app_install_script` is blank — also the apt package name to install |
+| `app_install_script` | string | no | `""` | Blank installs `app_choice` as an apt package (e.g. `nginx`). Set this to override with any shell command for apps that need their own installer instead of apt, e.g. Ollama: `"curl -fsSL https://ollama.com/install.sh \| sh"` |
+| `app_post_install_script` | string | no | `""` | Optional shell command that runs once, after install, regardless of which method above was used — e.g. `"ollama pull llama3.2:1b"` |
 | `tailscale_authkey` | string (secret) | yes | — | Injected via the Tailscale Auth Key credential |
 | `tailscale_tag` | string | no | `"tag:lxc-host"` | Tailscale ACL tag applied at join time |
 | `expose_to_internet` | boolean | no | `false` | If true, exposes `expose_port` publicly via Tailscale Funnel once approved |
@@ -147,6 +149,8 @@ Creates an LXC container directly on Proxmox (no VM layer), installs a chosen ap
   "template_storage": "local",
   "bridge": "vmbr0",
   "app_choice": "nginx",
+  "app_install_script": "",
+  "app_post_install_script": "",
   "expose_to_internet": false,
   "expose_port": 80
 }
@@ -156,6 +160,8 @@ Creates an LXC container directly on Proxmox (no VM layer), installs a chosen ap
 
 - Same tailnet-approval caveat as Create VM: the job doesn't block waiting for approval.
 - If `expose_to_internet: true`, a background script inside the container polls for approval and enables Funnel on its own once approved — check `/var/log/tailscale-funnel.log` inside the container for status. Only useful for services on `expose_port` that speak HTTP.
+- New apps never require a playbook change — pass different `app_choice`/`app_install_script`/`app_post_install_script`/`expose_port` values at launch time. `app_install_script` runs verbatim inside the container as root; treat it as trusted operator input, same as `tailscale_authkey`.
+- Example Ollama launch: `app_choice: "ollama"`, `app_install_script: "curl -fsSL https://ollama.com/install.sh | sh"`, `app_post_install_script: "ollama pull llama3.2:1b"`, `expose_port: 11434`. Give it real resources (`memory` ≥ 8192, `cores` ≥ 4, `ct_disk_gb` ≥ 20) — the 1024MB/1-core/8GB defaults are sized for nginx, not an LLM. No GPU acceleration on ARM/Mali hosts today — CPU inference only.
 
 ---
 

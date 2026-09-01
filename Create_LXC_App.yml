@@ -17,11 +17,19 @@
     memory: 1024                             # From AWX Survey
     cores: 1                                 # From AWX Survey
     ct_disk_gb: 8                            # From AWX Survey - plain GB number (pct's --rootfs unit, unlike qm resize's "8G" style)
-    app_choice: "nginx"                      # From AWX Survey - "nginx" (apt package) or "ollama"
-    # Only used when app_choice: ollama - a small model so a CPU-only pull/test
-    # is realistic. Ollama itself has no CUDA/ROCm path on this Mali/CIX
-    # hardware, so this container runs CPU inference only for now.
-    ollama_model: "llama3.2:1b"               # From AWX Survey
+    # app_choice is just a label (used for logging/messages) unless it also
+    # happens to be a valid apt package name - the actual install method is
+    # driven entirely by the two vars below, so a brand new app never needs
+    # a playbook edit, just different Survey values.
+    app_choice: "nginx"                      # From AWX Survey
+    # Leave blank for a plain apt package (installed as `apt-get install -y
+    # {{ app_choice }}`, e.g. nginx). Set this to override that with any
+    # shell command for apps that need their own installer instead - e.g.
+    # Ollama: "curl -fsSL https://ollama.com/install.sh | sh"
+    app_install_script: ""                   # From AWX Survey
+    # Optional - runs once after install regardless of which method was
+    # used above. E.g. for Ollama: "ollama pull llama3.2:1b"
+    app_post_install_script: ""              # From AWX Survey
     # Unprivileged LXC containers often don't reliably pick up DNS via DHCP the
     # way VMs do - set it explicitly rather than depending on that. Public
     # resolver on purpose: the container hasn't joined the tailnet yet at this
@@ -237,26 +245,24 @@
       ansible.builtin.pause:
         seconds: 10
 
-    - name: Install the app inside the container (apt package matching app_choice)
-      when: app_choice != 'ollama'
+    - name: Install the app inside the container as an apt package
+      when: app_install_script | length == 0
       ansible.builtin.command: >-
         pct exec {{ ctid }} -- bash -c "apt-get update && apt-get install -y curl {{ app_choice }}"
       changed_when: true
 
-    - name: Install Ollama inside the container
-      # Not an apt package - the official installer script detects
-      # distro/arch itself and sets up its own systemd service, bound to
-      # 127.0.0.1:11434 by default. That default is fine for this
-      # playbook's Funnel pattern below, which forwards from localhost on
-      # whatever box tailscale serve runs on - this container itself.
-      when: app_choice == 'ollama'
+    - name: Install the app inside the container via a custom install script
+      # Runs whatever was passed in app_install_script verbatim - trusted
+      # Survey/operator input, same trust model as tailscale_authkey and
+      # docker_apps.yml's app_command/app_extra_compose elsewhere in this repo.
+      when: app_install_script | length > 0
       ansible.builtin.command: >-
-        pct exec {{ ctid }} -- bash -c "apt-get update && apt-get install -y curl && curl -fsSL https://ollama.com/install.sh | sh"
+        pct exec {{ ctid }} -- bash -c "apt-get update && apt-get install -y curl && {{ app_install_script }}"
       changed_when: true
 
-    - name: Pull the default Ollama model
-      when: app_choice == 'ollama'
-      ansible.builtin.command: pct exec {{ ctid }} -- ollama pull {{ ollama_model }}
+    - name: Run the app's post-install command, if provided
+      when: app_post_install_script | length > 0
+      ansible.builtin.command: pct exec {{ ctid }} -- bash -c "{{ app_post_install_script }}"
       changed_when: true
 
     - name: Render the Tailscale join script content (matches post_boot.sh's proven flags)
