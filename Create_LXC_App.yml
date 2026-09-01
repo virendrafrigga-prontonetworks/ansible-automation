@@ -30,6 +30,17 @@
     # Optional - runs once after install regardless of which method was
     # used above. E.g. for Ollama: "ollama pull llama3.2:1b"
     app_post_install_script: ""              # From AWX Survey
+
+    # Passes the Proxmox host's Mali GPU (/dev/mali0) and DRM render nodes
+    # (/dev/dri) into the container, when present - detected automatically,
+    # skipped harmlessly (with a warning) on a host that has neither. Only
+    # covers Mali/DRM devices as found on ARM/CIX hosts like this Orange Pi -
+    # NVIDIA/AMD GPU passthrough would need separate, not-yet-implemented
+    # device paths. Getting the device node into the container is necessary
+    # but not sufficient for GPU-accelerated inference - that also needs a
+    # matching Mali userspace Vulkan driver installed inside the container,
+    # a separate, harder, vendor-driver-dependent problem this doesn't solve.
+    gpu_passthrough: false                   # From AWX Survey
     # Unprivileged LXC containers often don't reliably pick up DNS via DHCP the
     # way VMs do - set it explicitly rather than depending on that. Public
     # resolver on purpose: the container hasn't joined the tailnet yet at this
@@ -236,6 +247,63 @@
         block: |
           lxc.cgroup2.devices.allow: c 10:200 rwm
           lxc.mount.entry: /dev/net/tun dev/net/tun none bind,create=file
+
+    - name: Check for a Mali GPU device on this Proxmox host
+      ansible.builtin.stat:
+        path: /dev/mali0
+      register: mali_device
+      when: gpu_passthrough | bool
+
+    - name: Detect the Mali device's major:minor numbers
+      # Misc-class char devices (major 10) get their minor assigned
+      # dynamically at driver registration - can differ across
+      # boards/kernels, so this is looked up fresh each run rather than
+      # hardcoded.
+      when: gpu_passthrough | bool and mali_device.stat.exists
+      ansible.builtin.shell: |
+        set -o pipefail
+        ls -la /dev/mali0 | grep -oP '\d+,\s*\d+'
+      args:
+        executable: /bin/bash
+      register: mali_devnum
+      changed_when: false
+
+    - name: Check for DRM render nodes on this Proxmox host
+      ansible.builtin.stat:
+        path: /dev/dri
+      register: dri_device
+      when: gpu_passthrough | bool
+
+    - name: Warn if GPU passthrough was requested but no supported GPU device was found
+      when: gpu_passthrough | bool and not mali_device.stat.exists and not dri_device.stat.exists
+      ansible.builtin.debug:
+        msg: >-
+          gpu_passthrough was set but neither /dev/mali0 nor /dev/dri exist on this Proxmox host -
+          nothing was passed through. This playbook's GPU support currently only covers Mali/DRM
+          devices (as found on ARM/CIX hosts like this one); NVIDIA/AMD GPU passthrough isn't implemented yet.
+
+    - name: Allow GPU device passthrough inside the (unprivileged) container
+      # Deliberately no custom lxc.idmap here - the bind-mounted device
+      # nodes below are world read/write (mode=0666/0777), so the
+      # container's default (shifted) unprivileged UID/GID mapping can
+      # already open them without needing an identity-mapped GID. An
+      # identity mapping is what broke a prior manual attempt at this
+      # (newgidmap refused it - this host's /etc/subgid doesn't grant root
+      # permission to identity-map arbitrary host GIDs like the render
+      # group's), so this avoids that class of failure entirely.
+      when: gpu_passthrough | bool and (mali_device.stat.exists or dri_device.stat.exists)
+      ansible.builtin.blockinfile:
+        path: "/etc/pve/lxc/{{ ctid }}.conf"
+        marker: "# {mark} ANSIBLE MANAGED - GPU device passthrough"
+        block: |
+          {% if mali_device.stat.exists %}
+          lxc.cgroup2.devices.allow: c {{ mali_devnum.stdout | trim | regex_replace(',\s*', ':') }} rwm
+          lxc.mount.entry: /dev/mali0 dev/mali0 none bind,optional,create=file,mode=0666
+          {% endif %}
+          {% if dri_device.stat.exists %}
+          lxc.cgroup2.devices.allow: c 226:* rwm
+          lxc.mount.entry: /dev/dri dev/dri none bind,optional,create=dir,mode=0777
+          {% endif %}
 
     - name: Start the container
       ansible.builtin.command: pct start {{ ctid }}

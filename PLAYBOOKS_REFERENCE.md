@@ -131,6 +131,7 @@ Creates an LXC container directly on Proxmox (no VM layer), installs a chosen ap
 | `app_choice` | string | no | `"nginx"` | Label used for logging/messages, and — only when `app_install_script` is blank — also the apt package name to install |
 | `app_install_script` | string | no | `""` | Blank installs `app_choice` as an apt package (e.g. `nginx`). Set this to override with any shell command for apps that need their own installer instead of apt, e.g. Ollama: `"curl -fsSL https://ollama.com/install.sh \| sh"` |
 | `app_post_install_script` | string | no | `""` | Optional shell command that runs once, after install, regardless of which method above was used — e.g. `"ollama pull llama3.2:1b"` |
+| `gpu_passthrough` | boolean | no | `false` | Passes the Proxmox host's Mali GPU (`/dev/mali0`) and DRM render nodes (`/dev/dri`) into the container, if present — detected automatically each run, skipped harmlessly (with a warning in the job output) on a host with neither. Currently Mali/DRM-only (ARM/CIX hosts); NVIDIA/AMD passthrough isn't implemented. Getting the device into the container is not the same as Ollama being able to use it for acceleration — that also needs a matching Mali userspace Vulkan driver inside the container, which this does not install. |
 | `tailscale_authkey` | string (secret) | yes | — | Injected via the Tailscale Auth Key credential |
 | `tailscale_tag` | string | no | `"tag:lxc-host"` | Tailscale ACL tag applied at join time |
 | `expose_to_internet` | boolean | no | `false` | If true, exposes `expose_port` publicly via Tailscale Funnel once approved |
@@ -151,6 +152,7 @@ Creates an LXC container directly on Proxmox (no VM layer), installs a chosen ap
   "app_choice": "nginx",
   "app_install_script": "",
   "app_post_install_script": "",
+  "gpu_passthrough": false,
   "expose_to_internet": false,
   "expose_port": 80
 }
@@ -161,7 +163,8 @@ Creates an LXC container directly on Proxmox (no VM layer), installs a chosen ap
 - Same tailnet-approval caveat as Create VM: the job doesn't block waiting for approval.
 - If `expose_to_internet: true`, a background script inside the container polls for approval and enables Funnel on its own once approved — check `/var/log/tailscale-funnel.log` inside the container for status. Only useful for services on `expose_port` that speak HTTP.
 - New apps never require a playbook change — pass different `app_choice`/`app_install_script`/`app_post_install_script`/`expose_port` values at launch time. `app_install_script` runs verbatim inside the container as root; treat it as trusted operator input, same as `tailscale_authkey`.
-- Example Ollama launch: `app_choice: "ollama"`, `app_install_script: "curl -fsSL https://ollama.com/install.sh | sh"`, `app_post_install_script: "ollama pull llama3.2:1b"`, `expose_port: 11434`. Give it real resources (`memory` ≥ 8192, `cores` ≥ 4, `ct_disk_gb` ≥ 20) — the 1024MB/1-core/8GB defaults are sized for nginx, not an LLM. No GPU acceleration on ARM/Mali hosts today — CPU inference only.
+- Example Ollama launch: `app_choice: "ollama"`, `app_install_script: "apt-get install -y zstd && curl -fsSL https://ollama.com/install.sh | sh"` (Ollama's installer needs `zstd` to extract its release archive — not present on a minimal Ubuntu LXC image by default), `app_post_install_script: "ollama pull llama3.2:1b"`, `expose_port: 11434`. Size resources to the actual board's available RAM (check `free -h` on the target Proxmox host first) — a small board can be oversubscribed by a single large container; `memory: 4096` is enough for a 1B-class model.
+- `gpu_passthrough: true` gets the Mali/DRI devices into the container automatically — no manual `.conf` editing, ever. Every prior manual attempt at this on the Orange Pi host is what caused a container to fail to start (`newgidmap` rejecting a custom identity GID mapping); this playbook's version deliberately avoids that by relying on world-writable device bind-mount permissions instead.
 
 ---
 
