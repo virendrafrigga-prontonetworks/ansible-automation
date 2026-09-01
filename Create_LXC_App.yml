@@ -38,6 +38,25 @@
     expose_to_internet: false                # From AWX Survey
     expose_port: 80                          # From AWX Survey
 
+    # Multi-arch support: Proxmox's own "system" template catalog only ever
+    # carries x86_64 (amd64) builds, even on an (unofficial) ARM Proxmox
+    # port - confirmed live (an amd64 template on an aarch64 host fails with
+    # "Exec format error", the kernel simply can't execute it). Maps
+    # ansible_architecture to the naming convention both Proxmox's own
+    # catalog and images.linuxcontainers.org use in filenames/paths.
+    lxc_arch_map:
+      x86_64: amd64
+      aarch64: arm64
+    target_arch: "{{ lxc_arch_map[ansible_architecture] | default(ansible_architecture) }}"
+    # images.linuxcontainers.org fallback (used only when Proxmox's own
+    # catalog has no template for this host's architecture) needs a
+    # distro/codename pair, not a version number - extend this if you add
+    # more os_template values.
+    lxc_release_map:
+      ubuntu-24.04-standard: { distro: ubuntu, codename: noble }
+      ubuntu-22.04-standard: { distro: ubuntu, codename: jammy }
+      debian-12-standard: { distro: debian, codename: bookworm }
+
   tasks:
     - name: List LXC templates already present on this storage
       ansible.builtin.command: pveam list {{ template_storage }}
@@ -47,17 +66,64 @@
     - name: Stage and push the LXC template if missing
       when: os_template not in pveam_list.stdout
       block:
-        - name: Look up the exact template filename from the Proxmox appliance catalog
+        - name: Look up template filenames from the Proxmox appliance catalog
           ansible.builtin.command: pveam available --section system
           register: pveam_available
           changed_when: false
 
         # Best-effort parse of `pveam available` output ("system  <filename>" columns) -
         # verify this still matches the column format on your Proxmox version.
-        - name: Extract the matching template filename
+        # Requires the filename to ALSO match this host's architecture -
+        # Proxmox's own catalog is x86_64-only in practice, so this list is
+        # empty on an ARM host, triggering the linuxcontainers.org fallback
+        # below rather than silently grabbing a wrong-architecture template.
+        - name: Check whether the Proxmox catalog has a matching-architecture template
           ansible.builtin.set_fact:
-            lxc_template_filename: >-
-              {{ (pveam_available.stdout_lines | select('search', os_template) | list | first).split() | last }}
+            proxmox_catalog_match: >-
+              {{ pveam_available.stdout_lines | select('search', os_template) | select('search', target_arch) | list }}
+
+        - name: Use the Proxmox catalog's template when a matching-architecture one exists
+          when: proxmox_catalog_match | length > 0
+          ansible.builtin.set_fact:
+            lxc_template_filename: "{{ (proxmox_catalog_match | first).split() | last }}"
+            lxc_template_download_url: "http://download.proxmox.com/images/system/{{ (proxmox_catalog_match | first).split() | last }}"
+
+        - name: Fall back to images.linuxcontainers.org when no matching-architecture template exists in Proxmox's catalog
+          when: proxmox_catalog_match | length == 0
+          block:
+            - name: Look up the distro/codename for this os_template
+              ansible.builtin.set_fact:
+                lxc_release_info: "{{ lxc_release_map[os_template] | default({}) }}"
+
+            - name: Fail clearly if this os_template has no known linuxcontainers.org mapping
+              ansible.builtin.fail:
+                msg: >-
+                  No Proxmox-catalog template exists for architecture '{{ target_arch }}', and '{{ os_template }}'
+                  has no images.linuxcontainers.org mapping in lxc_release_map to fall back to. Add one, or use
+                  an os_template this host's architecture actually has a template for.
+              when: lxc_release_info == {}
+
+            - name: List available build dates for this distro/release/architecture
+              ansible.builtin.uri:
+                url: >-
+                  https://images.linuxcontainers.org/images/{{ lxc_release_info.distro }}/{{ lxc_release_info.codename }}/{{ target_arch }}/default/
+                return_content: true
+              register: lxc_images_index
+              delegate_to: localhost
+              become: false
+
+            - name: Extract the most recent build date directory
+              # No stable "latest" alias exists on this server - the date
+              # format (YYYYMMDD_HH:MM) sorts correctly as a plain string.
+              ansible.builtin.set_fact:
+                lxc_latest_build: "{{ (lxc_images_index.content | regex_findall('\\d{8}_\\d{2}:\\d{2}')) | sort | last }}"
+
+            - name: Set filename and source URL from images.linuxcontainers.org
+              ansible.builtin.set_fact:
+                lxc_template_filename: >-
+                  {{ os_template }}_{{ lxc_release_info.codename }}_{{ target_arch }}_{{ lxc_latest_build | replace(':', '-') }}.tar.xz
+                lxc_template_download_url: >-
+                  https://images.linuxcontainers.org/images/{{ lxc_release_info.distro }}/{{ lxc_release_info.codename }}/{{ target_arch }}/default/{{ lxc_latest_build }}/rootfs.tar.xz
 
         - name: Ensure local image cache directory exists on the Ansible worker
           ansible.builtin.file:
@@ -69,7 +135,7 @@
 
         - name: Download LXC template on the Ansible worker
           ansible.builtin.get_url:
-            url: "http://download.proxmox.com/images/system/{{ lxc_template_filename }}"
+            url: "{{ lxc_template_download_url }}"
             dest: "{{ local_cache_dir }}/{{ lxc_template_filename }}"
             mode: "0644"
             force: false
