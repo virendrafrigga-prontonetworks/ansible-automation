@@ -67,13 +67,14 @@
     # reachable from it regardless.
     ct_nameserver: "1.1.1.1"                 # From AWX Survey
 
-    # Leave both blank for DHCP (default). Set both to bypass DHCP entirely
-    # with a static IP - useful when a host's DHCP pool is exhausted or
-    # unreliable. Confirmed live on the Orange Pi host: a container's
-    # well-formed DHCPDISCOVER packets reached the bridge fine (captured via
-    # tcpdump) but got zero responses - the router's DHCP pool was full, not
-    # anything wrong on the Proxmox/container side. ct_ip is CIDR format,
-    # e.g. "192.168.1.50/24"; ct_gateway is that subnet's gateway IP.
+    # Leave both blank (default, recommended for everyone) - the container
+    # tries DHCP first, and if that genuinely fails, the playbook itself
+    # auto-detects this host's subnet/gateway and picks a free-looking
+    # static IP with no input needed. No one should have to already know
+    # this network's IPs just to launch a container. These two remain
+    # available only as an explicit override for a specific known-good
+    # address - an admin/ops concern, not normal usage. ct_ip is CIDR
+    # format, e.g. "192.168.1.50/24"; ct_gateway is that subnet's gateway IP.
     ct_ip: ""                                # From AWX Survey
     ct_gateway: ""                           # From AWX Survey - required together with ct_ip
 
@@ -460,21 +461,121 @@
           ansible.builtin.command: pct start {{ ctid }}
           changed_when: true
 
-        - name: Wait for the container's eth0 to have an IPv4 address
-          # A blind fixed pause isn't a real readiness check - confirmed live:
-          # a DHCP-configured container can still only have an IPv6
-          # link-local address on eth0 (no IPv4, "Network is unreachable")
-          # after 10 seconds, especially with multiple containers competing
-          # for DHCP on the same bridge/host at once. Retry until eth0
-          # actually has an IPv4 address instead of guessing a fixed
-          # duration is enough. Also covers the ct_ip static-IP path - that
-          # just satisfies this check on the first attempt, no DHCP involved.
-          ansible.builtin.command: pct exec {{ ctid }} -- ip -4 -o addr show eth0
-          register: ct_ipv4
-          until: ct_ipv4.rc == 0 and ct_ipv4.stdout | trim | length > 0
-          retries: 18
-          delay: 5
-          changed_when: false
+        - name: Ensure the container has a working IPv4 address, auto-falling back to a static IP if DHCP fails
+          # No one should ever have to already know this network's IPs just
+          # to launch a container - ct_ip/ct_gateway remain available as an
+          # explicit override, but the default path (both blank) tries DHCP
+          # first and, if it genuinely fails, figures out this host's own
+          # subnet/gateway and picks a free-looking address itself. Confirmed
+          # live: a blind fixed pause isn't a real readiness check (a
+          # DHCP-configured container can still only have an IPv6
+          # link-local address after 10s, especially with several
+          # containers competing for DHCP on the same bridge at once), and
+          # separately this exact host's DHCP pool has been observed to
+          # silently exhaust (well-formed DHCPDISCOVER packets reaching the
+          # bridge, captured via tcpdump, with zero responses).
+          block:
+            - name: Wait for the container's eth0 to have an IPv4 address
+              ansible.builtin.command: pct exec {{ ctid }} -- ip -4 -o addr show eth0
+              register: ct_ipv4
+              until: ct_ipv4.rc == 0 and ct_ipv4.stdout | trim | length > 0
+              retries: 18
+              delay: 5
+              changed_when: false
+          rescue:
+            - name: Fail immediately if an explicit ct_ip was set and still didn't come up
+              ansible.builtin.fail:
+                msg: >-
+                  ct_ip={{ ct_ip }}/ct_gateway={{ ct_gateway }} was set explicitly but the container's eth0
+                  never got that address - check it's actually free and correct for this host's network.
+              when: ct_ip | length > 0
+
+            - name: DHCP failed - auto-detect this host's subnet/gateway and pick a free static IP
+              block:
+                - name: Detect this host's own IPv4/prefix on the target bridge
+                  ansible.builtin.shell: |
+                    set -o pipefail
+                    ip -4 -o addr show {{ bridge }} | awk '{print $4}' | head -1
+                  args:
+                    executable: /bin/bash
+                  register: host_bridge_cidr
+                  changed_when: false
+
+                - name: Detect this host's default gateway
+                  ansible.builtin.shell: |
+                    set -o pipefail
+                    ip -4 route show default | awk '{print $3}' | head -1
+                  args:
+                    executable: /bin/bash
+                  register: host_gateway
+                  changed_when: false
+
+                - name: Fail clearly if the host's own network info couldn't be determined
+                  ansible.builtin.fail:
+                    msg: >-
+                      DHCP failed for this container and the automatic static-IP fallback couldn't
+                      determine this host's own subnet/gateway (bridge={{ bridge }}) - pass ct_ip/ct_gateway
+                      explicitly.
+                  when: host_bridge_cidr.stdout | trim | length == 0 or host_gateway.stdout | trim | length == 0
+
+                - name: Compute the subnet base and prefix length for candidate addresses
+                  # Assumes a /24-style LAN for generating last-octet
+                  # candidates (by far the most common home/office setup,
+                  # confirmed on this host) - the actual detected prefix
+                  # length is still used for the real container config below,
+                  # this is only for narrowing down what to probe.
+                  ansible.builtin.set_fact:
+                    static_ip_base: "{{ (host_bridge_cidr.stdout | trim | split('/') | first | split('.'))[:3] | join('.') }}"
+                    static_ip_prefix: "{{ host_bridge_cidr.stdout | trim | split('/') | last }}"
+
+                - name: Probe candidate addresses near the top of the subnet for one that's free
+                  ansible.builtin.command: ping -c 1 -W 1 {{ static_ip_base }}.{{ item }}
+                  register: ping_probe
+                  failed_when: false
+                  changed_when: false
+                  loop: "{{ range(240, 251) | list }}"
+
+                - name: Collect addresses that didn't respond to ping (free candidates)
+                  ansible.builtin.set_fact:
+                    free_ip_candidates: "{{ ping_probe.results | selectattr('rc', 'ne', 0) | map(attribute='item') | list }}"
+
+                - name: Fail clearly if no free address was found in the probed range
+                  ansible.builtin.fail:
+                    msg: >-
+                      DHCP failed and no free address was found in {{ static_ip_base }}.240-250 for the
+                      automatic static-IP fallback - pass ct_ip/ct_gateway explicitly with a known-free address.
+                  when: free_ip_candidates | length == 0
+
+                - name: Read back this container's current MAC address
+                  ansible.builtin.shell: |
+                    set -o pipefail
+                    grep '^net0' /etc/pve/lxc/{{ ctid }}.conf | grep -oP 'hwaddr=\K[0-9A-Fa-f:]+'
+                  args:
+                    executable: /bin/bash
+                  register: ct_hwaddr
+                  changed_when: false
+
+                - name: Apply the auto-picked static IP to the container
+                  ansible.builtin.set_fact:
+                    auto_static_ip: "{{ static_ip_base }}.{{ free_ip_candidates | first }}"
+
+                - name: Reconfigure the container's network with the auto-picked static IP
+                  ansible.builtin.command: >-
+                    pct set {{ ctid }} --net0
+                    name=eth0,bridge={{ bridge }},hwaddr={{ ct_hwaddr.stdout | trim }},ip={{ auto_static_ip }}/{{ static_ip_prefix }},gw={{ host_gateway.stdout | trim }}
+                  changed_when: true
+
+                - name: Restart networking inside the container to pick up the static IP
+                  ansible.builtin.command: pct exec {{ ctid }} -- systemctl restart systemd-networkd
+                  changed_when: true
+
+                - name: Verify the auto-picked static IP actually came up
+                  ansible.builtin.command: pct exec {{ ctid }} -- ip -4 -o addr show eth0
+                  register: ct_ipv4_retry
+                  until: ct_ipv4_retry.rc == 0 and ct_ipv4_retry.stdout | trim | length > 0
+                  retries: 6
+                  delay: 5
+                  changed_when: false
 
         - name: Install the app inside the container as an apt package
           when: app_install_script | length == 0

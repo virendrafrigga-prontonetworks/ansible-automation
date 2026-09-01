@@ -151,7 +151,7 @@ Creates an LXC container directly on Proxmox (no VM layer), installs a chosen ap
 | `template_storage` | string | no | `""` (auto-detect) | Storage for the LXC template file. Blank auto-detects the first active storage supporting `vztmpl` content. |
 | `bridge` | string | no | `""` (auto-detect) | Proxmox network bridge. Blank auto-detects — prefers `vmbr0` if present (the standard Proxmox default), otherwise the first bridge found on the host. Only set explicitly on a host with multiple bridges where `vmbr0` isn't the right one. |
 | `ct_nameserver` | string | no | `"1.1.1.1"` | DNS resolver (unprivileged LXC containers don't reliably get DNS via DHCP) |
-| `ct_ip` | string | no | `""` | Leave blank for DHCP (default). Set to a static CIDR (e.g. `"192.168.1.50/24"`) to bypass DHCP entirely — use this when a host's DHCP pool is exhausted/unreliable. Must be set together with `ct_gateway`. |
+| `ct_ip` | string | no | `""` | Leave blank (recommended for everyone, including admins). DHCP is tried first; if it genuinely fails, the job auto-detects the host's subnet/gateway and picks a free static IP itself — no one needs to supply network details. Only set this to force one specific known-good address. Must be set together with `ct_gateway`. |
 | `ct_gateway` | string | no | `""` | Gateway IP for the subnet in `ct_ip`. Required together with `ct_ip`; the job fails fast with a clear message if only one of the two is set. |
 | `app_install_script` | string | no | `""` | Escape hatch for a one-off app not worth adding to the catalog — any shell command, overrides both the catalog and the plain apt install entirely. Requires real shell/install knowledge; don't expose this as a plain text field to a normal end user — if you need it often enough, add a catalog entry in the playbook instead. |
 | `app_post_install_script` | string | no | `""` | Shell command that runs once after install, alongside `app_install_script` above. Same caveat — power-user field, not normal-user input. |
@@ -186,7 +186,7 @@ Creates an LXC container directly on Proxmox (no VM layer), installs a chosen ap
 ```
 The install script, post-install model pull, and `expose_port: 11434` all come from the catalog automatically — a normal user only ever picked `"ollama"` from a list.
 
-### Example `extra_vars` — advanced case (GPU passthrough + a static IP, admin/ops use only)
+### Example `extra_vars` — advanced case (GPU passthrough)
 
 ```json
 {
@@ -196,12 +196,10 @@ The install script, post-install model pull, and `expose_port: 11434` all come f
   "cores": 4,
   "ct_disk_gb": 20,
   "gpu_passthrough": true,
-  "ct_ip": "192.168.1.60/24",
-  "ct_gateway": "192.168.1.1",
   "expose_to_internet": false
 }
 ```
-`ct_ip`/`ct_gateway` are a workaround for a specific host's DHCP pool being unreliable, not something a normal end user should ever be asked to fill in — keep these behind an admin/advanced view, if exposed in the UI at all.
+`ct_ip`/`ct_gateway` aren't needed here either, even on a host with an unreliable DHCP pool — the job auto-recovers on its own (see behavior notes below). They're left in the Advanced table only as a rare explicit override, not something this example needs.
 
 ### Behavior notes
 
@@ -211,7 +209,7 @@ The install script, post-install model pull, and `expose_port: 11434` all come f
 - `gpu_passthrough: true` gets the Mali/DRI devices into the container automatically — no manual `.conf` editing, ever. Every prior manual attempt at this on the Orange Pi host is what caused a container to fail to start (`newgidmap` rejecting a custom identity GID mapping); this playbook's version deliberately avoids that by relying on world-writable device bind-mount permissions instead.
 - **Idempotent by `ct_name`** (matching Create VM's behavior): if a container with that name already exists, this job skips template staging/creation entirely and reuses it — it only re-checks tailnet reachability and (re-)applies `expose_to_internet`. This is the intended way to make an already-running container public later: re-launch with the same `ct_name` and `expose_to_internet: true`, don't create a second container.
 - If a container reuses an existing `ct_name`/ctid combination from a prior *failed* run, it's reused as-is — the idempotency check only confirms the name exists, not that creation finished successfully. If a job fails partway through, destroy that container (`pct stop <ctid> && pct destroy <ctid>`) before relaunching with the same name, rather than assuming a retry will fix a half-created container.
-- `ct_ip`/`ct_gateway` bypass DHCP with a static IP, entirely via variables — no manual `pct set`/host editing ever needed. Use this if a host's DHCP pool turns out to be exhausted or unreliable (confirmed live: a container's DHCP requests reached the bridge fine but got zero responses because the router's pool was full — nothing wrong on the Proxmox/container side, just no free lease to hand out).
+- **DHCP failure self-heals automatically, no `ct_ip`/`ct_gateway` needed.** The job tries DHCP first; if a container's `eth0` never gets an IPv4 address after retrying, it auto-detects this host's own subnet/gateway (from its routing table), probes a handful of addresses near the top of that range, and applies the first free one as a static IP — confirmed as a real failure mode live (a container's DHCP requests reached the bridge fine but got zero responses because the router's pool was full). `ct_ip`/`ct_gateway` still exist to force one specific known-good address, but nobody — admin or end user — needs to supply network details for the normal/recovery path.
 - `storage`/`template_storage`/`bridge` all auto-detect from the host by default — the caller never needs to know that specific host's storage layout or bridge naming just to launch a container.
 
 ---
