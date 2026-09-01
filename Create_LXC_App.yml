@@ -25,18 +25,29 @@
     memory: 1024                             # From AWX Survey
     cores: 1                                 # From AWX Survey
     ct_disk_gb: 8                            # From AWX Survey - plain GB number (pct's --rootfs unit, unlike qm resize's "8G" style)
-    # app_choice is just a label (used for logging/messages) unless it also
-    # happens to be a valid apt package name - the actual install method is
-    # driven entirely by the two vars below, so a brand new app never needs
-    # a playbook edit, just different Survey values.
-    app_choice: "nginx"                      # From AWX Survey
-    # Leave blank for a plain apt package (installed as `apt-get install -y
-    # {{ app_choice }}`, e.g. nginx). Set this to override that with any
-    # shell command for apps that need their own installer instead - e.g.
-    # Ollama: "curl -fsSL https://ollama.com/install.sh | sh"
+    # Built-in catalog of known apps - a normal user just picks a name here
+    # (e.g. a UI dropdown), never writes a shell command themselves. Add a
+    # new app by adding an entry here (a data-only change, no task logic to
+    # touch) - install_script/post_install_script/default_port fill in
+    # app_install_script/app_post_install_script/expose_port automatically
+    # whenever those are left at their defaults. Anything NOT in this
+    # catalog still works the old way: app_choice is installed as an apt
+    # package name, or app_install_script can be set directly for a fully
+    # custom one-off install - both remain available as the power-user path.
+    lxc_app_catalog:
+      nginx:
+        default_port: 80
+      ollama:
+        install_script: "apt-get install -y zstd && curl -fsSL https://ollama.com/install.sh | sh"
+        post_install_script: "ollama pull llama3.2:1b"
+        default_port: 11434
+
+    app_choice: "nginx"                      # From AWX Survey - a catalog name above, or any apt package name
+    # Advanced/escape hatch - leave blank to use the catalog entry above (if
+    # app_choice matches one) or a plain apt package install otherwise. Set
+    # this directly only for a fully custom, one-off app not worth adding
+    # to the catalog.
     app_install_script: ""                   # From AWX Survey
-    # Optional - runs once after install regardless of which method was
-    # used above. E.g. for Ollama: "ollama pull llama3.2:1b"
     app_post_install_script: ""              # From AWX Survey
 
     # Passes the Proxmox host's Mali GPU (/dev/mali0) and DRM render nodes
@@ -74,10 +85,12 @@
     tailscale_tag: "tag:lxc-host"
 
     # Private by default - only expose to the real internet if explicitly asked.
-    # nginx listens on 80 by default; adjust expose_port if app_choice ever
-    # grows to something listening elsewhere.
     expose_to_internet: false                # From AWX Survey
-    expose_port: 80                          # From AWX Survey
+    # 0 (default) auto-fills from the catalog entry's default_port above
+    # (e.g. Ollama -> 11434), falling back to 80 if app_choice isn't a
+    # catalog entry - a normal user shouldn't have to already know which
+    # port a given app listens on. Set explicitly to override.
+    expose_port: 0                           # From AWX Survey
 
     # Multi-arch support: Proxmox's own "system" template catalog only ever
     # carries x86_64 (amd64) builds, even on an (unofficial) ARM Proxmox
@@ -99,6 +112,23 @@
       debian-12-standard: { distro: debian, codename: bookworm }
 
   tasks:
+    - name: Resolve app_choice against the built-in app catalog
+      ansible.builtin.set_fact:
+        lxc_app_catalog_entry: "{{ lxc_app_catalog[app_choice] | default({}) }}"
+
+    - name: Fill in install method from the catalog, if app_install_script wasn't set explicitly
+      when: lxc_app_catalog_entry != {} and app_install_script | length == 0
+      ansible.builtin.set_fact:
+        app_install_script: "{{ lxc_app_catalog_entry.install_script | default('') }}"
+        app_post_install_script: >-
+          {{ app_post_install_script if app_post_install_script | length > 0
+             else lxc_app_catalog_entry.post_install_script | default('') }}
+
+    - name: Fill in expose_port from the catalog, if not set explicitly
+      when: expose_port == 0
+      ansible.builtin.set_fact:
+        expose_port: "{{ lxc_app_catalog_entry.default_port | default(80) }}"
+
     - name: Auto-detect rootfs storage on this host, if not explicitly set
       # Not every Proxmox host has local-lvm - some only have a plain
       # "local" dir storage (confirmed live). Ask the host itself what's

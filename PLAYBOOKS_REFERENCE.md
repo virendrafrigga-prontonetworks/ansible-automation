@@ -16,7 +16,7 @@ There are **7 playbooks** in three groups:
 
 All of them are idempotent by name — re-running a create playbook with the same name reuses/updates the existing resource instead of creating a duplicate; re-running a delete playbook against a name that doesn't exist is a harmless no-op.
 
-**Design principle: simple by default, capable when asked.** Each Create playbook's variables below are split into **Simple** (what a basic UI form needs — a handful of fields, sensible defaults) and **Advanced** (optional power-user knobs, left blank/default for the common case). Anything the playbook can determine by asking the Proxmox host itself — target architecture (amd64/arm64), storage backend availability — is auto-detected and never asked of the caller. Build the UI's default form from the Simple tables only; put Advanced fields behind a collapsed "Advanced" section, not the main flow.
+**Design principle: simple by default, capable when asked.** Each Create playbook's variables below are split into **Simple** (what a basic UI form needs — a handful of fields, sensible defaults) and **Advanced** (optional power-user knobs, left blank/default for the common case). Anything the playbook can determine by asking the Proxmox host itself — target architecture (amd64/arm64), storage backend availability, network bridge — is auto-detected and never asked of the caller. Anything that would otherwise require the caller to write a shell command or know infrastructure trivia (an app's install steps, its default port) is instead picked from a built-in catalog by a plain name (Create LXC's `app_choice`, Install Docker's `docker_apps[].name`) — raw scripting fields like `app_install_script` exist underneath as an admin/operator escape hatch, not something a normal end user should ever see as a text box. Build the UI's default form from the Simple tables and catalog names only; put Advanced fields behind a collapsed "Advanced" section, not the main flow.
 
 ---
 
@@ -125,13 +125,22 @@ Creates an LXC container directly on Proxmox (no VM layer), installs a chosen ap
 | Variable | Type | Required | Default | Description |
 |---|---|---|---|---|
 | `ct_name` | string | yes | `"app-lxc01"` | Container name and tailnet hostname |
-| `app_choice` | string | no | `"nginx"` | Apt package to install (e.g. `nginx`, `redis`, `postgresql`). See Advanced below for apps that need a custom installer instead. |
-| `memory` | integer | no | `1024` | RAM in MB |
+| `app_choice` | string | no | `"nginx"` | A name from the built-in app catalog (currently `nginx`, `ollama`), or any apt package name for anything not in the catalog. A UI should present the catalog names as a dropdown/picker — no shell knowledge needed for those. |
+| `memory` | integer | no | `1024` | RAM in MB — for `ollama`, use at least `4096` |
 | `cores` | integer | no | `1` | CPU cores |
-| `ct_disk_gb` | integer | no | `8` | Root filesystem size in GB (plain number, no unit suffix) |
-| `expose_to_internet` | boolean | no | `false` | If true, exposes `expose_port` publicly via Tailscale Funnel once approved |
-| `expose_port` | integer | no | `80` | Local port to expose when `expose_to_internet` is true |
+| `ct_disk_gb` | integer | no | `8` | Root filesystem size in GB (plain number, no unit suffix) — for `ollama`, use at least `20` |
+| `expose_to_internet` | boolean | no | `false` | If true, exposes the app publicly via Tailscale Funnel once approved |
 | `tailscale_authkey` | string (secret) | yes | — | Injected via the Tailscale Auth Key credential |
+
+### App catalog (built-in presets)
+
+| `app_choice` value | What happens | Default `expose_port` |
+|---|---|---|
+| `nginx` | Installed via apt | `80` |
+| `ollama` | Installed via Ollama's own installer (handles the `zstd` dependency automatically), then pulls `llama3.2:1b` so it's immediately usable | `11434` |
+| anything else | Installed via apt using `app_choice` as the package name (e.g. `redis-server`, `postgresql`) | `80` |
+
+`expose_port` is filled in automatically from this table and never needs to be specified for a catalog app — only set it explicitly to override.
 
 ### Advanced — leave blank/default unless you specifically need to override them
 
@@ -144,8 +153,8 @@ Creates an LXC container directly on Proxmox (no VM layer), installs a chosen ap
 | `ct_nameserver` | string | no | `"1.1.1.1"` | DNS resolver (unprivileged LXC containers don't reliably get DNS via DHCP) |
 | `ct_ip` | string | no | `""` | Leave blank for DHCP (default). Set to a static CIDR (e.g. `"192.168.1.50/24"`) to bypass DHCP entirely — use this when a host's DHCP pool is exhausted/unreliable. Must be set together with `ct_gateway`. |
 | `ct_gateway` | string | no | `""` | Gateway IP for the subnet in `ct_ip`. Required together with `ct_ip`; the job fails fast with a clear message if only one of the two is set. |
-| `app_install_script` | string | no | `""` | Overrides `app_choice`'s apt install with any shell command, for apps that need their own installer — e.g. Ollama: `"curl -fsSL https://ollama.com/install.sh \| sh"` |
-| `app_post_install_script` | string | no | `""` | Optional shell command that runs once, after install, regardless of which method above was used — e.g. `"ollama pull llama3.2:1b"` |
+| `app_install_script` | string | no | `""` | Escape hatch for a one-off app not worth adding to the catalog — any shell command, overrides both the catalog and the plain apt install entirely. Requires real shell/install knowledge; don't expose this as a plain text field to a normal end user — if you need it often enough, add a catalog entry in the playbook instead. |
+| `app_post_install_script` | string | no | `""` | Shell command that runs once after install, alongside `app_install_script` above. Same caveat — power-user field, not normal-user input. |
 | `gpu_passthrough` | boolean | no | `false` | Passes the Proxmox host's Mali GPU (`/dev/mali0`) and DRM render nodes (`/dev/dri`) into the container, if present — detected automatically each run, skipped harmlessly (with a warning in the job output) on a host with neither. Currently Mali/DRM-only (ARM/CIX hosts); NVIDIA/AMD passthrough isn't implemented. Getting the device into the container is not the same as Ollama being able to use it for acceleration — that also needs a matching Mali userspace Vulkan driver inside the container, which this does not install. |
 | `tailscale_tag` | string | no | `"tag:lxc-host"` | Tailscale ACL tag applied at join time |
 
@@ -158,37 +167,47 @@ Creates an LXC container directly on Proxmox (no VM layer), installs a chosen ap
   "memory": 1024,
   "cores": 1,
   "ct_disk_gb": 8,
-  "expose_to_internet": false,
-  "expose_port": 80
+  "expose_to_internet": false
 }
 ```
-(`storage`/`template_storage`/`bridge` etc. are omitted — auto-detection and defaults cover the normal case.)
+(`storage`/`template_storage`/`bridge`/`expose_port` etc. are all omitted — auto-detection and the app catalog cover the normal case entirely.)
 
-### Example `extra_vars` — advanced case (Ollama with GPU passthrough and a static IP)
+### Example `extra_vars` — Ollama, still just catalog fields, no shell knowledge needed
+
+```json
+{
+  "ct_name": "ollama-lxc01",
+  "app_choice": "ollama",
+  "memory": 4096,
+  "cores": 4,
+  "ct_disk_gb": 20,
+  "expose_to_internet": false
+}
+```
+The install script, post-install model pull, and `expose_port: 11434` all come from the catalog automatically — a normal user only ever picked `"ollama"` from a list.
+
+### Example `extra_vars` — advanced case (GPU passthrough + a static IP, admin/ops use only)
 
 ```json
 {
   "ct_name": "ollama-gpu-lxc01",
+  "app_choice": "ollama",
   "memory": 4096,
   "cores": 4,
   "ct_disk_gb": 20,
-  "app_choice": "ollama",
-  "app_install_script": "apt-get install -y zstd && curl -fsSL https://ollama.com/install.sh | sh",
-  "app_post_install_script": "ollama pull llama3.2:1b",
   "gpu_passthrough": true,
   "ct_ip": "192.168.1.60/24",
   "ct_gateway": "192.168.1.1",
-  "expose_to_internet": false,
-  "expose_port": 11434
+  "expose_to_internet": false
 }
 ```
+`ct_ip`/`ct_gateway` are a workaround for a specific host's DHCP pool being unreliable, not something a normal end user should ever be asked to fill in — keep these behind an admin/advanced view, if exposed in the UI at all.
 
 ### Behavior notes
 
 - Same tailnet-approval caveat as Create VM: the job doesn't block waiting for approval.
 - If `expose_to_internet: true`, a background script inside the container polls for approval and enables Funnel on its own once approved — check `/var/log/tailscale-funnel.log` inside the container for status. Only useful for services on `expose_port` that speak HTTP.
-- New apps never require a playbook change — pass different `app_choice`/`app_install_script`/`app_post_install_script`/`expose_port` values at launch time. `app_install_script` runs verbatim inside the container as root; treat it as trusted operator input, same as `tailscale_authkey`.
-- Example Ollama launch: `app_choice: "ollama"`, `app_install_script: "apt-get install -y zstd && curl -fsSL https://ollama.com/install.sh | sh"` (Ollama's installer needs `zstd` to extract its release archive — not present on a minimal Ubuntu LXC image by default), `app_post_install_script: "ollama pull llama3.2:1b"`, `expose_port: 11434`. Size resources to the actual board's available RAM (check `free -h` on the target Proxmox host first) — a small board can be oversubscribed by a single large container; `memory: 4096` is enough for a 1B-class model.
+- Adding a genuinely new app to the catalog (not just using `app_choice` as a raw apt package name) is a data-only edit to `lxc_app_catalog` in the playbook — no task logic to touch. `app_install_script`/`app_post_install_script` remain available directly for a true one-off that isn't worth cataloging; both run verbatim inside the container as root, so treat them as trusted operator/admin input, same as `tailscale_authkey` — never expose them as free-text fields to a normal end user.
 - `gpu_passthrough: true` gets the Mali/DRI devices into the container automatically — no manual `.conf` editing, ever. Every prior manual attempt at this on the Orange Pi host is what caused a container to fail to start (`newgidmap` rejecting a custom identity GID mapping); this playbook's version deliberately avoids that by relying on world-writable device bind-mount permissions instead.
 - **Idempotent by `ct_name`** (matching Create VM's behavior): if a container with that name already exists, this job skips template staging/creation entirely and reuses it — it only re-checks tailnet reachability and (re-)applies `expose_to_internet`. This is the intended way to make an already-running container public later: re-launch with the same `ct_name` and `expose_to_internet: true`, don't create a second container.
 - If a container reuses an existing `ct_name`/ctid combination from a prior *failed* run, it's reused as-is — the idempotency check only confirms the name exists, not that creation finished successfully. If a job fails partway through, destroy that container (`pct stop <ctid> && pct destroy <ctid>`) before relaunching with the same name, rather than assuming a retry will fix a half-created container.
