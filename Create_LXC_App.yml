@@ -63,8 +63,20 @@
       register: pveam_list
       changed_when: false
 
+    - name: Check whether a matching-architecture template is already staged
+      # A plain substring check on os_template alone isn't enough - it would
+      # count a wrong-architecture leftover (e.g. an amd64 file from an
+      # earlier attempt on an ARM host) as "already staged" and skip fetching
+      # the correct one. Confirmed live: this exact bug caused every LXC
+      # container on an ARM host to silently keep reusing a stale amd64
+      # rootfs no matter how many times the fallback download logic below
+      # was fixed, because this check never even let it run.
+      ansible.builtin.set_fact:
+        template_already_staged: >-
+          {{ (pveam_list.stdout_lines | select('search', os_template) | select('search', target_arch) | list | length) > 0 }}
+
     - name: Stage and push the LXC template if missing
-      when: os_template not in pveam_list.stdout
+      when: not template_already_staged
       block:
         - name: Look up template filenames from the Proxmox appliance catalog
           ansible.builtin.command: pveam available --section system
@@ -149,9 +161,13 @@
             mode: "0644"
 
     - name: Re-list LXC templates to resolve the stored volume ID
+      # Must filter on architecture too, not just the name - otherwise this
+      # can resolve back to a wrong-architecture leftover even when the
+      # staging block above just fetched the correct one (same class of bug
+      # as the "already staged" check above, confirmed live on an ARM host).
       ansible.builtin.shell: |
         set -o pipefail
-        pveam list {{ template_storage }} | awk -v tmpl="{{ os_template }}" '$1 ~ tmpl {print $1}'
+        pveam list {{ template_storage }} | awk -v tmpl="{{ os_template }}" -v arch="{{ target_arch }}" '$1 ~ tmpl && $1 ~ arch {print $1}'
       args:
         executable: /bin/bash
       register: pveam_resolved
