@@ -39,7 +39,18 @@
         default_port: 80
       ollama:
         install_script: "apt-get install -y zstd && curl -fsSL https://ollama.com/install.sh | sh"
-        post_install_script: "ollama pull llama3.2:1b"
+        # Ollama's server rejects requests whose Host header it doesn't
+        # recognize by default (anti-DNS-rebinding protection) - confirmed
+        # live: Tailscale Funnel proxying correctly to 127.0.0.1:11434
+        # still got a 403 from Ollama itself because the Host header was
+        # the funnel hostname, not localhost. OLLAMA_ORIGINS=* is required
+        # for it to be reachable through any reverse proxy/tunnel at all,
+        # not just Tailscale - set unconditionally so this app never needs
+        # a follow-up manual fix regardless of how it's exposed.
+        post_install_script: >-
+          mkdir -p /etc/systemd/system/ollama.service.d &&
+          printf '[Service]\nEnvironment=OLLAMA_ORIGINS=*\n' > /etc/systemd/system/ollama.service.d/override.conf &&
+          systemctl daemon-reload && systemctl restart ollama && sleep 2 && ollama pull llama3.2:1b
         default_port: 11434
 
     app_choice: "nginx"                      # From AWX Survey - a catalog name above, or any apt package name
@@ -135,8 +146,21 @@
         resolved_app_post_install_script: >-
           {{ app_post_install_script if app_post_install_script | length > 0
              else lxc_app_catalog_entry.post_install_script | default('') }}
+        # Treats an incoming expose_port of exactly 80 the same as blank
+        # when the catalog entry wants a different port - confirmed live:
+        # an AWX Survey default of 80 (left over from before this catalog
+        # existed) arrives as an explicit extra_var, which the plain
+        # "> 0 means set" check below can't tell apart from someone
+        # genuinely choosing 80. 80 was this whole playbook's only default
+        # before the catalog existed, so treating it as "probably just the
+        # old default, not a deliberate choice" is a reasonable trade-off -
+        # the rare case of someone genuinely wanting Ollama on port 80
+        # specifically can still be forced via the Advanced app_install_script
+        # path or by using a port other than 80.
         resolved_expose_port: >-
-          {{ expose_port if expose_port | int > 0
+          {{ expose_port if (expose_port | int > 0 and not
+                              (expose_port | int == 80 and lxc_app_catalog_entry.default_port is defined
+                               and lxc_app_catalog_entry.default_port != 80))
              else lxc_app_catalog_entry.default_port | default(80) }}
 
     - name: Validate rootfs storage against this host, auto-correcting if invalid or unset
