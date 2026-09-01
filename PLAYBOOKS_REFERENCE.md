@@ -128,6 +128,8 @@ Creates an LXC container directly on Proxmox (no VM layer), installs a chosen ap
 | `template_storage` | string | no | `"local"` | Storage used for the LXC template file itself — must support the `vztmpl` content type (`local-lvm` does **not**) |
 | `bridge` | string | no | `"vmbr0"` | Proxmox network bridge |
 | `ct_nameserver` | string | no | `"1.1.1.1"` | DNS resolver (unprivileged LXC containers don't reliably get DNS via DHCP) |
+| `ct_ip` | string | no | `""` | Leave blank for DHCP (default). Set to a static CIDR (e.g. `"192.168.1.50/24"`) to bypass DHCP entirely — use this when a host's DHCP pool is exhausted/unreliable. Must be set together with `ct_gateway`. |
+| `ct_gateway` | string | no | `""` | Gateway IP for the subnet in `ct_ip`. Required together with `ct_ip`; the job fails fast with a clear message if only one of the two is set. |
 | `app_choice` | string | no | `"nginx"` | Label used for logging/messages, and — only when `app_install_script` is blank — also the apt package name to install |
 | `app_install_script` | string | no | `""` | Blank installs `app_choice` as an apt package (e.g. `nginx`). Set this to override with any shell command for apps that need their own installer instead of apt, e.g. Ollama: `"curl -fsSL https://ollama.com/install.sh \| sh"` |
 | `app_post_install_script` | string | no | `""` | Optional shell command that runs once, after install, regardless of which method above was used — e.g. `"ollama pull llama3.2:1b"` |
@@ -153,6 +155,8 @@ Creates an LXC container directly on Proxmox (no VM layer), installs a chosen ap
   "app_install_script": "",
   "app_post_install_script": "",
   "gpu_passthrough": false,
+  "ct_ip": "",
+  "ct_gateway": "",
   "expose_to_internet": false,
   "expose_port": 80
 }
@@ -166,6 +170,8 @@ Creates an LXC container directly on Proxmox (no VM layer), installs a chosen ap
 - Example Ollama launch: `app_choice: "ollama"`, `app_install_script: "apt-get install -y zstd && curl -fsSL https://ollama.com/install.sh | sh"` (Ollama's installer needs `zstd` to extract its release archive — not present on a minimal Ubuntu LXC image by default), `app_post_install_script: "ollama pull llama3.2:1b"`, `expose_port: 11434`. Size resources to the actual board's available RAM (check `free -h` on the target Proxmox host first) — a small board can be oversubscribed by a single large container; `memory: 4096` is enough for a 1B-class model.
 - `gpu_passthrough: true` gets the Mali/DRI devices into the container automatically — no manual `.conf` editing, ever. Every prior manual attempt at this on the Orange Pi host is what caused a container to fail to start (`newgidmap` rejecting a custom identity GID mapping); this playbook's version deliberately avoids that by relying on world-writable device bind-mount permissions instead.
 - **Idempotent by `ct_name`** (matching Create VM's behavior): if a container with that name already exists, this job skips template staging/creation entirely and reuses it — it only re-checks tailnet reachability and (re-)applies `expose_to_internet`. This is the intended way to make an already-running container public later: re-launch with the same `ct_name` and `expose_to_internet: true`, don't create a second container.
+- If a container reuses an existing `ct_name`/ctid combination from a prior *failed* run, it's reused as-is — the idempotency check only confirms the name exists, not that creation finished successfully. If a job fails partway through, destroy that container (`pct stop <ctid> && pct destroy <ctid>`) before relaunching with the same name, rather than assuming a retry will fix a half-created container.
+- `ct_ip`/`ct_gateway` bypass DHCP with a static IP, entirely via variables — no manual `pct set`/host editing ever needed. Use this if a host's DHCP pool turns out to be exhausted or unreliable (confirmed live: a container's DHCP requests reached the bridge fine but got zero responses because the router's pool was full — nothing wrong on the Proxmox/container side, just no free lease to hand out).
 
 ---
 

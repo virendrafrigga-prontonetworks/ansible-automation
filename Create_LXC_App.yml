@@ -48,6 +48,16 @@
     # reachable from it regardless.
     ct_nameserver: "1.1.1.1"                 # From AWX Survey
 
+    # Leave both blank for DHCP (default). Set both to bypass DHCP entirely
+    # with a static IP - useful when a host's DHCP pool is exhausted or
+    # unreliable. Confirmed live on the Orange Pi host: a container's
+    # well-formed DHCPDISCOVER packets reached the bridge fine (captured via
+    # tcpdump) but got zero responses - the router's DHCP pool was full, not
+    # anything wrong on the Proxmox/container side. ct_ip is CIDR format,
+    # e.g. "192.168.1.50/24"; ct_gateway is that subnet's gateway IP.
+    ct_ip: ""                                # From AWX Survey
+    ct_gateway: ""                           # From AWX Survey - required together with ct_ip
+
     # From AWX Credential/Vault - a Reusable + Tagged Tailscale auth key
     # (not Ephemeral), same one used by Playbook 1. Never hardcode a real key here.
     tailscale_authkey: ""
@@ -81,6 +91,13 @@
       debian-12-standard: { distro: debian, codename: bookworm }
 
   tasks:
+    - name: Fail clearly if ct_ip is set without ct_gateway (or vice versa)
+      ansible.builtin.fail:
+        msg: >-
+          ct_ip and ct_gateway must be set together for a static IP
+          (ct_ip='{{ ct_ip }}', ct_gateway='{{ ct_gateway }}') - or leave both blank to use DHCP.
+      when: (ct_ip | length > 0) != (ct_gateway | length > 0)
+
     - name: Check whether an LXC container with this name already exists
       ansible.builtin.shell: |
         set -o pipefail
@@ -252,7 +269,7 @@
             --memory {{ memory }}
             --cores {{ cores }}
             --rootfs {{ storage }}:{{ ct_disk_gb }}
-            --net0 name=eth0,bridge={{ bridge }},ip=dhcp
+            --net0 name=eth0,bridge={{ bridge }},{{ 'ip=' ~ ct_ip ~ ',gw=' ~ ct_gateway if ct_ip | length > 0 else 'ip=dhcp' }}
             --nameserver {{ ct_nameserver }}
             --unprivileged 1
             --features nesting=1
@@ -331,13 +348,15 @@
           ansible.builtin.command: pct start {{ ctid }}
           changed_when: true
 
-        - name: Wait for the container to obtain an IPv4 address via DHCP
+        - name: Wait for the container's eth0 to have an IPv4 address
           # A blind fixed pause isn't a real readiness check - confirmed live:
-          # a container can still only have an IPv6 link-local address on
-          # eth0 (no IPv4, "Network is unreachable") after 10 seconds,
-          # especially with multiple containers competing for DHCP on the
-          # same bridge/host at once. Retry until eth0 actually has an
-          # IPv4 address instead of guessing a fixed duration is enough.
+          # a DHCP-configured container can still only have an IPv6
+          # link-local address on eth0 (no IPv4, "Network is unreachable")
+          # after 10 seconds, especially with multiple containers competing
+          # for DHCP on the same bridge/host at once. Retry until eth0
+          # actually has an IPv4 address instead of guessing a fixed
+          # duration is enough. Also covers the ct_ip static-IP path - that
+          # just satisfies this check on the first attempt, no DHCP involved.
           ansible.builtin.command: pct exec {{ ctid }} -- ip -4 -o addr show eth0
           register: ct_ipv4
           until: ct_ipv4.rc == 0 and ct_ipv4.stdout | trim | length > 0
