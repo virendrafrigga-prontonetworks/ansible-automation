@@ -34,6 +34,7 @@
         funnel_enable_script: "{{ lookup('template', playbook_dir + '/templates/enable-funnel.sh.j2') }}"
       vars:
         tailscale_hostname: "{{ target_host }}"
+        funnel_port: "{{ expose_port }}"
 
     - name: Push the Funnel enable script to the VM
       ansible.builtin.copy:

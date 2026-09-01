@@ -78,9 +78,17 @@
               auto-correcting to '{{ image_storages.stdout_lines | first }}'.
               Available on this host: {{ image_storages.stdout_lines | join(', ') }}.
 
-        - name: Use the requested VM disk storage if valid, otherwise the auto-detected one
+        - name: Resolve the VM disk storage to use (requested value if valid, otherwise auto-detected)
+          # Named resolved_storage, NOT storage - set_fact can never
+          # override storage here if it also arrived as an extra_var
+          # (extra_vars have Ansible's highest precedence, above set_fact,
+          # so a same-named "correction" is silently ignored and the
+          # original extra_var value wins every later reference). Confirmed
+          # live: this exact mechanism was why an AWX Survey's stale
+          # storage=local-lvm default kept reaching pct create/qm unchanged
+          # despite this same validation logic supposedly correcting it.
           ansible.builtin.set_fact:
-            storage: >-
+            resolved_storage: >-
               {{ storage if (storage | length > 0 and storage in image_storages.stdout_lines)
                  else image_storages.stdout_lines | first }}
 
@@ -109,9 +117,9 @@
               '{{ 'vmbr0' if 'vmbr0' in host_bridges.stdout_lines else host_bridges.stdout_lines | first }}'.
               Available on this host: {{ host_bridges.stdout_lines | join(', ') }}.
 
-        - name: Use the requested bridge if valid, otherwise the auto-detected one (prefers vmbr0)
+        - name: Resolve the bridge to use (requested value if valid, otherwise auto-detected, prefers vmbr0)
           ansible.builtin.set_fact:
-            bridge: >-
+            resolved_bridge: >-
               {{ bridge if (bridge | length > 0 and bridge in host_bridges.stdout_lines)
                  else ('vmbr0' if 'vmbr0' in host_bridges.stdout_lines else host_bridges.stdout_lines | first) }}
 
@@ -153,7 +161,7 @@
             qm set {{ new_vmid }}
             --memory {{ memory }}
             --cores {{ cores }}
-            --net0 virtio,bridge={{ bridge }}
+            --net0 virtio,bridge={{ resolved_bridge }}
           changed_when: true
 
         - name: Resize VM disk
@@ -219,6 +227,7 @@
             funnel_enable_script: "{{ lookup('template', playbook_dir + '/templates/enable-funnel.sh.j2') }}"
           vars:
             tailscale_hostname: "{{ vm_name }}"
+            funnel_port: "{{ expose_port }}"
 
         - name: Wait for the QEMU guest agent to be ready inside the VM
           ansible.builtin.command: qm guest cmd {{ new_vmid }} ping

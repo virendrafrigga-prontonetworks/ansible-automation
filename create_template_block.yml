@@ -92,23 +92,23 @@
         --memory {{ memory }}
         --cores {{ cores }}
         --cpu host
-        --net0 virtio,bridge={{ bridge }}
+        --net0 virtio,bridge={{ resolved_bridge }}
       args:
         creates: "/etc/pve/qemu-server/{{ template_id }}.conf"
 
     - name: Import disk to storage
-      ansible.builtin.command: qm importdisk {{ template_id }} {{ remote_image_file }} {{ storage }}
+      ansible.builtin.command: qm importdisk {{ template_id }} {{ remote_image_file }} {{ resolved_storage }}
       changed_when: true
 
     - name: Configure VM hardware for disk
       ansible.builtin.command: >-
         qm set {{ template_id }}
         --scsihw virtio-scsi-pci
-        --scsi0 {{ storage }}:vm-{{ template_id }}-disk-0
+        --scsi0 {{ resolved_storage }}:vm-{{ template_id }}-disk-0
       changed_when: true
 
     - name: Configure VM hardware for cloud-init
-      ansible.builtin.command: qm set {{ template_id }} --ide2 {{ storage }}:cloudinit
+      ansible.builtin.command: qm set {{ template_id }} --ide2 {{ resolved_storage }}:cloudinit
       changed_when: true
 
     - name: Configure boot order

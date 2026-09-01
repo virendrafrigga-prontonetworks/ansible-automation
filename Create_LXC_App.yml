@@ -117,18 +117,27 @@
       ansible.builtin.set_fact:
         lxc_app_catalog_entry: "{{ lxc_app_catalog[app_choice] | default({}) }}"
 
-    - name: Fill in install method from the catalog, if app_install_script wasn't set explicitly
-      when: lxc_app_catalog_entry != {} and app_install_script | length == 0
+    - name: Resolve install method and exposed port from the catalog
+      # IMPORTANT: never set_fact back onto app_install_script/
+      # app_post_install_script/expose_port themselves - extra_vars (which is
+      # exactly what AWX Survey/launch payloads inject) have the HIGHEST
+      # precedence in Ansible, above set_fact, so a task trying to
+      # "correct" a variable that also arrived as an extra_var is silently
+      # ignored and the original extra_var value wins every time it's
+      # referenced again. Confirmed live: this exact mechanism was also why
+      # storage/template_storage/bridge "corrections" below use distinct
+      # resolved_* names rather than reassigning the input names. Compute
+      # genuinely new fact names here and use ONLY those downstream.
       ansible.builtin.set_fact:
-        app_install_script: "{{ lxc_app_catalog_entry.install_script | default('') }}"
-        app_post_install_script: >-
+        resolved_app_install_script: >-
+          {{ app_install_script if app_install_script | length > 0
+             else lxc_app_catalog_entry.install_script | default('') }}
+        resolved_app_post_install_script: >-
           {{ app_post_install_script if app_post_install_script | length > 0
              else lxc_app_catalog_entry.post_install_script | default('') }}
-
-    - name: Fill in expose_port from the catalog, if not set explicitly
-      when: expose_port == 0
-      ansible.builtin.set_fact:
-        expose_port: "{{ lxc_app_catalog_entry.default_port | default(80) }}"
+        resolved_expose_port: >-
+          {{ expose_port if expose_port | int > 0
+             else lxc_app_catalog_entry.default_port | default(80) }}
 
     - name: Validate rootfs storage against this host, auto-correcting if invalid or unset
       # Runs every time, not just when storage is blank - a stale AWX
@@ -164,9 +173,12 @@
               set) - auto-correcting to '{{ rootfs_storages.stdout_lines | first }}'.
               Available on this host: {{ rootfs_storages.stdout_lines | join(', ') }}.
 
-        - name: Use the requested rootfs storage if valid, otherwise the auto-detected one
+        - name: Resolve the rootfs storage to use (requested value if valid, otherwise auto-detected)
+          # Named resolved_storage, NOT storage - see the note on the app
+          # catalog task above about why set_fact can never override a
+          # same-named extra_var.
           ansible.builtin.set_fact:
-            storage: >-
+            resolved_storage: >-
               {{ storage if (storage | length > 0 and storage in rootfs_storages.stdout_lines)
                  else rootfs_storages.stdout_lines | first }}
 
@@ -196,9 +208,9 @@
               wasn't set) - auto-correcting to '{{ vztmpl_storages.stdout_lines | first }}'.
               Available on this host: {{ vztmpl_storages.stdout_lines | join(', ') }}.
 
-        - name: Use the requested template storage if valid, otherwise the auto-detected one
+        - name: Resolve the template storage to use (requested value if valid, otherwise auto-detected)
           ansible.builtin.set_fact:
-            template_storage: >-
+            resolved_template_storage: >-
               {{ template_storage if (template_storage | length > 0 and template_storage in vztmpl_storages.stdout_lines)
                  else vztmpl_storages.stdout_lines | first }}
 
@@ -227,9 +239,9 @@
               '{{ 'vmbr0' if 'vmbr0' in host_bridges.stdout_lines else host_bridges.stdout_lines | first }}'.
               Available on this host: {{ host_bridges.stdout_lines | join(', ') }}.
 
-        - name: Use the requested bridge if valid, otherwise the auto-detected one (prefers vmbr0)
+        - name: Resolve the bridge to use (requested value if valid, otherwise auto-detected, prefers vmbr0)
           ansible.builtin.set_fact:
-            bridge: >-
+            resolved_bridge: >-
               {{ bridge if (bridge | length > 0 and bridge in host_bridges.stdout_lines)
                  else ('vmbr0' if 'vmbr0' in host_bridges.stdout_lines else host_bridges.stdout_lines | first) }}
 
@@ -263,7 +275,7 @@
       when: existing_ct.stdout | trim | length == 0
       block:
         - name: List LXC templates already present on this storage
-          ansible.builtin.command: pveam list {{ template_storage }}
+          ansible.builtin.command: pveam list {{ resolved_template_storage }}
           register: pveam_list
           changed_when: false
 
@@ -371,7 +383,7 @@
           # as the "already staged" check above, confirmed live on an ARM host).
           ansible.builtin.shell: |
             set -o pipefail
-            pveam list {{ template_storage }} | awk -v tmpl="{{ os_template }}" -v arch="{{ target_arch }}" '$1 ~ tmpl && $1 ~ arch {print $1}'
+            pveam list {{ resolved_template_storage }} | awk -v tmpl="{{ os_template }}" -v arch="{{ target_arch }}" '$1 ~ tmpl && $1 ~ arch {print $1}'
           args:
             executable: /bin/bash
           register: pveam_resolved
@@ -410,8 +422,8 @@
             --hostname {{ ct_name }}
             --memory {{ memory }}
             --cores {{ cores }}
-            --rootfs {{ storage }}:{{ ct_disk_gb }}
-            --net0 name=eth0,bridge={{ bridge }},{{ 'ip=' ~ ct_ip ~ ',gw=' ~ ct_gateway if ct_ip | length > 0 else 'ip=dhcp' }}
+            --rootfs {{ resolved_storage }}:{{ ct_disk_gb }}
+            --net0 name=eth0,bridge={{ resolved_bridge }},{{ 'ip=' ~ ct_ip ~ ',gw=' ~ ct_gateway if ct_ip | length > 0 else 'ip=dhcp' }}
             --nameserver {{ ct_nameserver }}
             --unprivileged 1
             --features nesting=1
@@ -524,7 +536,7 @@
                 - name: Detect this host's own IPv4/prefix on the target bridge
                   ansible.builtin.shell: |
                     set -o pipefail
-                    ip -4 -o addr show {{ bridge }} | awk '{print $4}' | head -1
+                    ip -4 -o addr show {{ resolved_bridge }} | awk '{print $4}' | head -1
                   args:
                     executable: /bin/bash
                   register: host_bridge_cidr
@@ -543,7 +555,7 @@
                   ansible.builtin.fail:
                     msg: >-
                       DHCP failed for this container and the automatic static-IP fallback couldn't
-                      determine this host's own subnet/gateway (bridge={{ bridge }}) - pass ct_ip/ct_gateway
+                      determine this host's own subnet/gateway (bridge={{ resolved_bridge }}) - pass ct_ip/ct_gateway
                       explicitly.
                   when: host_bridge_cidr.stdout | trim | length == 0 or host_gateway.stdout | trim | length == 0
 
@@ -591,7 +603,7 @@
                 - name: Reconfigure the container's network with the auto-picked static IP
                   ansible.builtin.command: >-
                     pct set {{ ctid }} --net0
-                    name=eth0,bridge={{ bridge }},hwaddr={{ ct_hwaddr.stdout | trim }},ip={{ auto_static_ip }}/{{ static_ip_prefix }},gw={{ host_gateway.stdout | trim }}
+                    name=eth0,bridge={{ resolved_bridge }},hwaddr={{ ct_hwaddr.stdout | trim }},ip={{ auto_static_ip }}/{{ static_ip_prefix }},gw={{ host_gateway.stdout | trim }}
                   changed_when: true
 
                 - name: Restart networking inside the container to pick up the static IP
@@ -607,23 +619,25 @@
                   changed_when: false
 
         - name: Install the app inside the container as an apt package
-          when: app_install_script | length == 0
+          when: resolved_app_install_script | length == 0
           ansible.builtin.command: >-
             pct exec {{ ctid }} -- bash -c "apt-get update && apt-get install -y curl {{ app_choice }}"
           changed_when: true
 
         - name: Install the app inside the container via a custom install script
-          # Runs whatever was passed in app_install_script verbatim - trusted
-          # Survey/operator input, same trust model as tailscale_authkey and
-          # docker_apps.yml's app_command/app_extra_compose elsewhere in this repo.
-          when: app_install_script | length > 0
+          # Runs whatever resolved_app_install_script ended up as (catalog
+          # entry or explicit app_install_script override) verbatim -
+          # trusted Survey/operator input, same trust model as
+          # tailscale_authkey and docker_apps.yml's app_command/
+          # app_extra_compose elsewhere in this repo.
+          when: resolved_app_install_script | length > 0
           ansible.builtin.command: >-
-            pct exec {{ ctid }} -- bash -c "apt-get update && apt-get install -y curl && {{ app_install_script }}"
+            pct exec {{ ctid }} -- bash -c "apt-get update && apt-get install -y curl && {{ resolved_app_install_script }}"
           changed_when: true
 
         - name: Run the app's post-install command, if provided
-          when: app_post_install_script | length > 0
-          ansible.builtin.command: pct exec {{ ctid }} -- bash -c "{{ app_post_install_script }}"
+          when: resolved_app_post_install_script | length > 0
+          ansible.builtin.command: pct exec {{ ctid }} -- bash -c "{{ resolved_app_post_install_script }}"
           changed_when: true
 
         - name: Render the Tailscale join script content (matches post_boot.sh's proven flags)
@@ -685,6 +699,7 @@
             funnel_enable_script: "{{ lookup('template', playbook_dir + '/templates/enable-funnel.sh.j2') }}"
           vars:
             tailscale_hostname: "{{ ct_name }}"
+            funnel_port: "{{ resolved_expose_port }}"
 
         - name: Stage the Funnel enable script on the Proxmox host
           ansible.builtin.copy:

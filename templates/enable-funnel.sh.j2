@@ -8,7 +8,7 @@ set -uo pipefail
 LOGFILE="/var/log/tailscale-funnel.log"
 exec > >(tee -a "$LOGFILE") 2>&1
 
-EXPOSE_PORT="{{ expose_port }}"
+EXPOSE_PORT="{{ funnel_port }}"
 ERR_FILE="$(mktemp)"
 
 echo "[$(date -Is)] Waiting for tailnet admin approval before enabling Funnel on port $EXPOSE_PORT..."
