@@ -533,41 +533,69 @@
 
             - name: DHCP failed - auto-detect this host's subnet/gateway and pick a free static IP
               block:
-                - name: Detect this host's own IPv4/prefix on the target bridge
+                - name: Detect this host's default route
+                  # Deliberately NOT reading the bridge's own address -
+                  # confirmed live that a bridge (vmbr0) can have no IPv4
+                  # address of its own at all even though containers on it
+                  # reach the real LAN fine (this host's own management IP
+                  # lives on the physical eth0 NIC instead). The default
+                  # route is a much more reliable source: it works
+                  # regardless of which interface actually holds the
+                  # host's address.
                   ansible.builtin.shell: |
                     set -o pipefail
-                    ip -4 -o addr show {{ resolved_bridge }} | awk '{print $4}' | head -1
+                    ip -4 route show default
                   args:
                     executable: /bin/bash
-                  register: host_bridge_cidr
-                  changed_when: false
-
-                - name: Detect this host's default gateway
-                  ansible.builtin.shell: |
-                    set -o pipefail
-                    ip -4 route show default | awk '{print $3}' | head -1
-                  args:
-                    executable: /bin/bash
-                  register: host_gateway
+                  register: host_default_route
                   changed_when: false
 
                 - name: Fail clearly if the host's own network info couldn't be determined
                   ansible.builtin.fail:
                     msg: >-
                       DHCP failed for this container and the automatic static-IP fallback couldn't
-                      determine this host's own subnet/gateway (bridge={{ resolved_bridge }}) - pass ct_ip/ct_gateway
-                      explicitly.
-                  when: host_bridge_cidr.stdout | trim | length == 0 or host_gateway.stdout | trim | length == 0
+                      determine this host's own default route - pass ct_ip/ct_gateway explicitly.
+                  when: host_default_route.stdout | trim | length == 0
 
-                - name: Compute the subnet base and prefix length for candidate addresses
-                  # Assumes a /24-style LAN for generating last-octet
-                  # candidates (by far the most common home/office setup,
-                  # confirmed on this host) - the actual detected prefix
-                  # length is still used for the real container config below,
-                  # this is only for narrowing down what to probe.
+                - name: Extract the gateway from the host's default route
+                  ansible.builtin.shell: |
+                    set -o pipefail
+                    echo '{{ host_default_route.stdout }}' | grep -oP 'via \K\S+'
+                  args:
+                    executable: /bin/bash
+                  register: detected_gateway_result
+                  changed_when: false
+
+                - name: Extract this host's own source IP from its default route
+                  ansible.builtin.shell: |
+                    set -o pipefail
+                    echo '{{ host_default_route.stdout }}' | grep -oP 'src \K\S+'
+                  args:
+                    executable: /bin/bash
+                  register: detected_host_ip_result
+                  changed_when: false
+
+                - name: Fail clearly if the gateway or host IP couldn't be parsed out of the route
+                  ansible.builtin.fail:
+                    msg: >-
+                      Couldn't parse a gateway/source IP out of this host's default route
+                      ({{ host_default_route.stdout | trim }}) - pass ct_ip/ct_gateway explicitly.
+                  when: detected_gateway_result.stdout | trim | length == 0 or detected_host_ip_result.stdout | trim | length == 0
+
+                - name: Set the detected gateway and host IP facts
                   ansible.builtin.set_fact:
-                    static_ip_base: "{{ (host_bridge_cidr.stdout | trim | split('/') | first | split('.'))[:3] | join('.') }}"
-                    static_ip_prefix: "{{ host_bridge_cidr.stdout | trim | split('/') | last }}"
+                    detected_gateway: "{{ detected_gateway_result.stdout | trim }}"
+                    detected_host_ip: "{{ detected_host_ip_result.stdout | trim }}"
+
+                - name: Compute the subnet base for candidate addresses
+                  # Assumes a /24-style LAN (by far the most common
+                  # home/office setup, confirmed on this host) - both for
+                  # generating last-octet candidates to probe and for the
+                  # real container config below, since there's no interface
+                  # address here to read a real prefix length from.
+                  ansible.builtin.set_fact:
+                    static_ip_base: "{{ (detected_host_ip | split('.'))[:3] | join('.') }}"
+                    static_ip_prefix: "24"
 
                 - name: Probe candidate addresses near the top of the subnet for one that's free
                   ansible.builtin.command: ping -c 1 -W 1 {{ static_ip_base }}.{{ item }}
@@ -603,7 +631,7 @@
                 - name: Reconfigure the container's network with the auto-picked static IP
                   ansible.builtin.command: >-
                     pct set {{ ctid }} --net0
-                    name=eth0,bridge={{ resolved_bridge }},hwaddr={{ ct_hwaddr.stdout | trim }},ip={{ auto_static_ip }}/{{ static_ip_prefix }},gw={{ host_gateway.stdout | trim }}
+                    name=eth0,bridge={{ resolved_bridge }},hwaddr={{ ct_hwaddr.stdout | trim }},ip={{ auto_static_ip }}/{{ static_ip_prefix }},gw={{ detected_gateway }}
                   changed_when: true
 
                 - name: Restart networking inside the container to pick up the static IP
