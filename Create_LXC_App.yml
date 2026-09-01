@@ -475,15 +475,42 @@
               nothing was passed through. This playbook's GPU support currently only covers Mali/DRM
               devices (as found on ARM/CIX hosts like this one); NVIDIA/AMD GPU passthrough isn't implemented yet.
 
+        - name: Loosen permissions on the Mali device so an unprivileged container can actually open it
+          # Confirmed live: mode=0666 on the lxc.mount.entry line below does
+          # NOT change permissions for a bind mount over an already-existing
+          # device file - that option only applies when LXC has to create a
+          # placeholder first. The container ends up seeing the host's real
+          # permissions (crw-rw---- root:render), which an unprivileged
+          # container's shifted UID/GID can never satisfy - resulting in a
+          # plain "Permission denied" when any userspace driver tries to
+          # open it, confirmed via vulkaninfo/panvk. Since a bind mount
+          # shares the same underlying file, chmod'ing the host's actual
+          # device file fixes visibility from inside the container too, and
+          # avoids needing the identity GID mapping that broke a prior
+          # manual attempt (newgidmap - this host's /etc/subgid doesn't
+          # grant root permission to identity-map the render group's GID).
+          # Trade-off worth knowing: this makes the device world-accessible
+          # on the host itself, not just to this one container - a minor
+          # security loosening (GPU access, not credentials/data),
+          # reasonable for a single-operator host but a real change.
+          when: gpu_passthrough | bool and mali_device.stat.exists
+          ansible.builtin.file:
+            path: /dev/mali0
+            mode: "0666"
+
+        - name: Loosen permissions on DRM render/card nodes so an unprivileged container can actually open them
+          when: gpu_passthrough | bool and dri_device.stat.exists
+          ansible.builtin.shell: |
+            set -o pipefail
+            chmod 0666 /dev/dri/render* /dev/dri/card* 2>/dev/null || true
+          args:
+            executable: /bin/bash
+          changed_when: true
+
         - name: Allow GPU device passthrough inside the (unprivileged) container
-          # Deliberately no custom lxc.idmap here - the bind-mounted device
-          # nodes below are world read/write (mode=0666/0777), so the
-          # container's default (shifted) unprivileged UID/GID mapping can
-          # already open them without needing an identity-mapped GID. An
-          # identity mapping is what broke a prior manual attempt at this
-          # (newgidmap refused it - this host's /etc/subgid doesn't grant root
-          # permission to identity-map arbitrary host GIDs like the render
-          # group's), so this avoids that class of failure entirely.
+          # No custom lxc.idmap here - see the permission-loosening tasks
+          # above for why that's unnecessary once the host's own device
+          # files are world read/write.
           when: gpu_passthrough | bool and (mali_device.stat.exists or dri_device.stat.exists)
           ansible.builtin.blockinfile:
             path: "/etc/pve/lxc/{{ ctid }}.conf"
