@@ -130,12 +130,15 @@
       ansible.builtin.set_fact:
         expose_port: "{{ lxc_app_catalog_entry.default_port | default(80) }}"
 
-    - name: Auto-detect rootfs storage on this host, if not explicitly set
-      # Not every Proxmox host has local-lvm - some only have a plain
-      # "local" dir storage (confirmed live). Ask the host itself what's
-      # actually available and enabled for LXC rootfs, rather than
-      # requiring the caller to already know this host's specific layout.
-      when: storage | length == 0
+    - name: Validate rootfs storage against this host, auto-correcting if invalid or unset
+      # Runs every time, not just when storage is blank - a stale AWX
+      # Survey default, an old saved extra_vars, or a value copied from a
+      # different host are all just as invalid as leaving it blank.
+      # Confirmed live: "local-lvm" kept getting passed in from an AWX-side
+      # default left over from before this host's layout was known, and a
+      # blank-only check silently trusted it instead of catching the
+      # mismatch. Always ask the host what's actually there and correct to
+      # a real answer rather than trusting the input blindly.
       block:
         - name: List active storages on this host that support LXC rootfs
           ansible.builtin.shell: |
@@ -150,15 +153,24 @@
           ansible.builtin.fail:
             msg: >-
               No active storage on this Proxmox host supports LXC rootfs (content type
-              'rootdir') - pass 'storage' explicitly, or check 'pvesm status' on the host.
+              'rootdir') - check 'pvesm status' on the host.
           when: rootfs_storages.stdout_lines | length == 0
 
-        - name: Set auto-detected rootfs storage
-          ansible.builtin.set_fact:
-            storage: "{{ rootfs_storages.stdout_lines | first }}"
+        - name: Warn when the requested rootfs storage isn't valid on this host
+          when: storage | length > 0 and storage not in rootfs_storages.stdout_lines
+          ansible.builtin.debug:
+            msg: >-
+              storage='{{ storage }}' isn't a valid LXC-rootfs storage on this host (or wasn't
+              set) - auto-correcting to '{{ rootfs_storages.stdout_lines | first }}'.
+              Available on this host: {{ rootfs_storages.stdout_lines | join(', ') }}.
 
-    - name: Auto-detect template storage on this host, if not explicitly set
-      when: template_storage | length == 0
+        - name: Use the requested rootfs storage if valid, otherwise the auto-detected one
+          ansible.builtin.set_fact:
+            storage: >-
+              {{ storage if (storage | length > 0 and storage in rootfs_storages.stdout_lines)
+                 else rootfs_storages.stdout_lines | first }}
+
+    - name: Validate template storage against this host, auto-correcting if invalid or unset
       block:
         - name: List active storages on this host that support LXC templates
           ansible.builtin.shell: |
@@ -173,15 +185,24 @@
           ansible.builtin.fail:
             msg: >-
               No active storage on this Proxmox host supports LXC templates (content type
-              'vztmpl') - pass 'template_storage' explicitly, or check 'pvesm status' on the host.
+              'vztmpl') - check 'pvesm status' on the host.
           when: vztmpl_storages.stdout_lines | length == 0
 
-        - name: Set auto-detected template storage
-          ansible.builtin.set_fact:
-            template_storage: "{{ vztmpl_storages.stdout_lines | first }}"
+        - name: Warn when the requested template storage isn't valid on this host
+          when: template_storage | length > 0 and template_storage not in vztmpl_storages.stdout_lines
+          ansible.builtin.debug:
+            msg: >-
+              template_storage='{{ template_storage }}' isn't a valid vztmpl storage on this host (or
+              wasn't set) - auto-correcting to '{{ vztmpl_storages.stdout_lines | first }}'.
+              Available on this host: {{ vztmpl_storages.stdout_lines | join(', ') }}.
 
-    - name: Auto-detect network bridge on this host, if not explicitly set
-      when: bridge | length == 0
+        - name: Use the requested template storage if valid, otherwise the auto-detected one
+          ansible.builtin.set_fact:
+            template_storage: >-
+              {{ template_storage if (template_storage | length > 0 and template_storage in vztmpl_storages.stdout_lines)
+                 else vztmpl_storages.stdout_lines | first }}
+
+    - name: Validate network bridge against this host, auto-correcting if invalid or unset
       block:
         - name: List bridge interfaces on this host
           ansible.builtin.shell: |
@@ -195,14 +216,22 @@
         - name: Fail clearly if no bridge interface was found
           ansible.builtin.fail:
             msg: >-
-              No bridge interface found on this Proxmox host - pass 'bridge' explicitly,
-              or check 'ip link show type bridge' on the host.
+              No bridge interface found on this Proxmox host - check 'ip link show type bridge' on the host.
           when: host_bridges.stdout_lines | length == 0
 
-        - name: Set auto-detected bridge (prefers vmbr0 if present)
+        - name: Warn when the requested bridge isn't valid on this host
+          when: bridge | length > 0 and bridge not in host_bridges.stdout_lines
+          ansible.builtin.debug:
+            msg: >-
+              bridge='{{ bridge }}' doesn't exist on this host (or wasn't set) - auto-correcting to
+              '{{ 'vmbr0' if 'vmbr0' in host_bridges.stdout_lines else host_bridges.stdout_lines | first }}'.
+              Available on this host: {{ host_bridges.stdout_lines | join(', ') }}.
+
+        - name: Use the requested bridge if valid, otherwise the auto-detected one (prefers vmbr0)
           ansible.builtin.set_fact:
             bridge: >-
-              {{ 'vmbr0' if 'vmbr0' in host_bridges.stdout_lines else host_bridges.stdout_lines | first }}
+              {{ bridge if (bridge | length > 0 and bridge in host_bridges.stdout_lines)
+                 else ('vmbr0' if 'vmbr0' in host_bridges.stdout_lines else host_bridges.stdout_lines | first) }}
 
     - name: Fail clearly if ct_ip is set without ct_gateway (or vice versa)
       ansible.builtin.fail:
