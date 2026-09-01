@@ -15,7 +15,11 @@
     # if a host has multiple valid options and you need a non-default one.
     storage: ""                           # From AWX Survey - block storage for the container's rootfs
     template_storage: ""                  # From AWX Survey - storage for the LXC template file (vztmpl content)
-    bridge: "vmbr0"                        # From AWX Survey
+    # Leave blank (default) to auto-detect - picks vmbr0 if present (the
+    # standard Proxmox default), otherwise the first bridge interface found
+    # on the host. Only set this explicitly on a host with multiple bridges
+    # where vmbr0 isn't the right one.
+    bridge: ""                             # From AWX Survey
     os_template: "ubuntu-24.04-standard"    # From AWX Survey - Proxmox LXC template name (no version/arch suffix)
     ct_name: "app-lxc01"                    # From AWX Survey
     memory: 1024                             # From AWX Survey
@@ -144,6 +148,30 @@
         - name: Set auto-detected template storage
           ansible.builtin.set_fact:
             template_storage: "{{ vztmpl_storages.stdout_lines | first }}"
+
+    - name: Auto-detect network bridge on this host, if not explicitly set
+      when: bridge | length == 0
+      block:
+        - name: List bridge interfaces on this host
+          ansible.builtin.shell: |
+            set -o pipefail
+            ip -o link show type bridge | awk -F': ' '{print $2}'
+          args:
+            executable: /bin/bash
+          register: host_bridges
+          changed_when: false
+
+        - name: Fail clearly if no bridge interface was found
+          ansible.builtin.fail:
+            msg: >-
+              No bridge interface found on this Proxmox host - pass 'bridge' explicitly,
+              or check 'ip link show type bridge' on the host.
+          when: host_bridges.stdout_lines | length == 0
+
+        - name: Set auto-detected bridge (prefers vmbr0 if present)
+          ansible.builtin.set_fact:
+            bridge: >-
+              {{ 'vmbr0' if 'vmbr0' in host_bridges.stdout_lines else host_bridges.stdout_lines | first }}
 
     - name: Fail clearly if ct_ip is set without ct_gateway (or vice versa)
       ansible.builtin.fail:

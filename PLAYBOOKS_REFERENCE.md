@@ -85,7 +85,7 @@ Ensures the requested OS template exists on Proxmox (builds it on first use, reu
 | Variable | Type | Required | Default | Description |
 |---|---|---|---|---|
 | `storage` | string | no | `""` (auto-detect) | Proxmox storage backend for the VM's disk. Blank auto-detects the first active storage on the host that supports VM disk images (`pvesm status --content images`) — only set this if a host has more than one valid option and you need a non-default one. |
-| `bridge` | string | no | `"vmbr0"` | Proxmox network bridge |
+| `bridge` | string | no | `""` (auto-detect) | Proxmox network bridge. Blank auto-detects — prefers `vmbr0` if present (the standard Proxmox default), otherwise the first bridge found on the host. Only set explicitly on a host with multiple bridges where `vmbr0` isn't the right one. |
 | `vm_user` | string | no | `"pronto"` | Login user baked into the VM via cloud-init |
 | `tailscale_tag` | string | no | `"tag:vm-provisioned"` | Tailscale ACL tag applied at join time |
 
@@ -110,7 +110,7 @@ Ensures the requested OS template exists on Proxmox (builds it on first use, reu
 - The job's final message tells you whether the VM was already reachable over Tailscale SSH at the time the job finished. If not, that's expected and not a failure — just means approval is still pending.
 - If `expose_to_internet: true`, exposure is handled the same detached-background-script way as the other playbooks (delivered via the QEMU guest agent, not SSH, since the VM may not be tailnet-reachable yet at this point) — check `/var/log/tailscale-funnel.log` inside the VM for status. Nothing needs to be run separately for this to happen.
 - `os_type` is deliberately limited to Ubuntu/Debian — RHEL-family images (CentOS/Rocky/AlmaLinux) were tried and removed due to unresolved boot/cloud-init issues on this Proxmox host.
-- `storage` auto-detects from the host by default — the caller never needs to know that specific host's storage layout (some hosts have `local-lvm`, some only have `local`, etc.) just to launch a VM.
+- `storage`/`bridge` both auto-detect from the host by default — the caller never needs to know that specific host's storage layout or bridge naming just to launch a VM.
 
 ---
 
@@ -140,7 +140,7 @@ Creates an LXC container directly on Proxmox (no VM layer), installs a chosen ap
 | `os_template` | string | no | `"ubuntu-24.04-standard"` | Proxmox LXC appliance template name (no version/arch suffix) |
 | `storage` | string | no | `""` (auto-detect) | Block storage for the container's rootfs. Blank auto-detects the first active storage on the host supporting `rootdir` content — only override on a host with multiple valid options. |
 | `template_storage` | string | no | `""` (auto-detect) | Storage for the LXC template file. Blank auto-detects the first active storage supporting `vztmpl` content. |
-| `bridge` | string | no | `"vmbr0"` | Proxmox network bridge |
+| `bridge` | string | no | `""` (auto-detect) | Proxmox network bridge. Blank auto-detects — prefers `vmbr0` if present (the standard Proxmox default), otherwise the first bridge found on the host. Only set explicitly on a host with multiple bridges where `vmbr0` isn't the right one. |
 | `ct_nameserver` | string | no | `"1.1.1.1"` | DNS resolver (unprivileged LXC containers don't reliably get DNS via DHCP) |
 | `ct_ip` | string | no | `""` | Leave blank for DHCP (default). Set to a static CIDR (e.g. `"192.168.1.50/24"`) to bypass DHCP entirely — use this when a host's DHCP pool is exhausted/unreliable. Must be set together with `ct_gateway`. |
 | `ct_gateway` | string | no | `""` | Gateway IP for the subnet in `ct_ip`. Required together with `ct_ip`; the job fails fast with a clear message if only one of the two is set. |
@@ -193,7 +193,7 @@ Creates an LXC container directly on Proxmox (no VM layer), installs a chosen ap
 - **Idempotent by `ct_name`** (matching Create VM's behavior): if a container with that name already exists, this job skips template staging/creation entirely and reuses it — it only re-checks tailnet reachability and (re-)applies `expose_to_internet`. This is the intended way to make an already-running container public later: re-launch with the same `ct_name` and `expose_to_internet: true`, don't create a second container.
 - If a container reuses an existing `ct_name`/ctid combination from a prior *failed* run, it's reused as-is — the idempotency check only confirms the name exists, not that creation finished successfully. If a job fails partway through, destroy that container (`pct stop <ctid> && pct destroy <ctid>`) before relaunching with the same name, rather than assuming a retry will fix a half-created container.
 - `ct_ip`/`ct_gateway` bypass DHCP with a static IP, entirely via variables — no manual `pct set`/host editing ever needed. Use this if a host's DHCP pool turns out to be exhausted or unreliable (confirmed live: a container's DHCP requests reached the bridge fine but got zero responses because the router's pool was full — nothing wrong on the Proxmox/container side, just no free lease to hand out).
-- `storage`/`template_storage` auto-detect from the host by default — the caller never needs to know that specific host's storage layout (some hosts have `local-lvm`, some only have `local`, etc.) just to launch a container.
+- `storage`/`template_storage`/`bridge` all auto-detect from the host by default — the caller never needs to know that specific host's storage layout or bridge naming just to launch a container.
 
 ---
 
