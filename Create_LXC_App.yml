@@ -498,208 +498,222 @@
               lxc.mount.entry: /dev/dri dev/dri none bind,optional,create=dir,mode=0777
               {% endif %}
 
-        - name: Start the container
-          ansible.builtin.command: pct start {{ ctid }}
-          changed_when: true
+    - name: Check current container status
+      # Runs every time (new or reused container) - if a prior run created
+      # the container but was interrupted before finishing, or the
+      # container was stopped for any other reason, this catches it rather
+      # than assuming "the name exists" means "it's running and healthy."
+      ansible.builtin.command: pct status {{ ctid }}
+      register: ct_status
+      changed_when: false
 
-        - name: Ensure the container has a working IPv4 address, auto-falling back to a static IP if DHCP fails
-          # No one should ever have to already know this network's IPs just
-          # to launch a container - ct_ip/ct_gateway remain available as an
-          # explicit override, but the default path (both blank) tries DHCP
-          # first and, if it genuinely fails, figures out this host's own
-          # subnet/gateway and picks a free-looking address itself. Confirmed
-          # live: a blind fixed pause isn't a real readiness check (a
-          # DHCP-configured container can still only have an IPv6
-          # link-local address after 10s, especially with several
-          # containers competing for DHCP on the same bridge at once), and
-          # separately this exact host's DHCP pool has been observed to
-          # silently exhaust (well-formed DHCPDISCOVER packets reaching the
-          # bridge, captured via tcpdump, with zero responses).
+    - name: Start the container if it isn't already running
+      ansible.builtin.command: pct start {{ ctid }}
+      when: "'status: running' not in ct_status.stdout"
+      changed_when: true
+
+    - name: Ensure the container has a working IPv4 address, auto-falling back to a static IP if DHCP fails
+      # Runs every time, not just for brand-new containers - confirmed live:
+      # a container left over from an interrupted prior run can be reused
+      # by name while still stuck on a broken network from that earlier
+      # attempt. No one should ever have to already know this network's IPs
+      # just to launch a container - ct_ip/ct_gateway remain available as
+      # an explicit override, but the default path (both blank) tries DHCP
+      # first and, if it genuinely fails, figures out this host's own
+      # subnet/gateway and picks a free-looking address itself.
+      block:
+        - name: Wait for the container's eth0 to have an IPv4 address
+          ansible.builtin.command: pct exec {{ ctid }} -- ip -4 -o addr show eth0
+          register: ct_ipv4
+          until: ct_ipv4.rc == 0 and ct_ipv4.stdout | trim | length > 0
+          retries: 18
+          delay: 5
+          changed_when: false
+      rescue:
+        - name: Fail immediately if an explicit ct_ip was set and still didn't come up
+          ansible.builtin.fail:
+            msg: >-
+              ct_ip={{ ct_ip }}/ct_gateway={{ ct_gateway }} was set explicitly but the container's eth0
+              never got that address - check it's actually free and correct for this host's network.
+          when: ct_ip | length > 0
+
+        - name: DHCP failed - auto-detect this host's subnet/gateway and pick a free static IP
           block:
-            - name: Wait for the container's eth0 to have an IPv4 address
-              ansible.builtin.command: pct exec {{ ctid }} -- ip -4 -o addr show eth0
-              register: ct_ipv4
-              until: ct_ipv4.rc == 0 and ct_ipv4.stdout | trim | length > 0
-              retries: 18
-              delay: 5
+            - name: Detect this host's default route
+              # Deliberately NOT reading the bridge's own address -
+              # confirmed live that a bridge (vmbr0) can have no IPv4
+              # address of its own at all even though containers on it
+              # reach the real LAN fine (this host's own management IP
+              # lives on the physical eth0 NIC instead). The default
+              # route is a much more reliable source: it works
+              # regardless of which interface actually holds the
+              # host's address.
+              ansible.builtin.shell: |
+                set -o pipefail
+                ip -4 route show default
+              args:
+                executable: /bin/bash
+              register: host_default_route
               changed_when: false
-          rescue:
-            - name: Fail immediately if an explicit ct_ip was set and still didn't come up
+
+            - name: Fail clearly if the host's own network info couldn't be determined
               ansible.builtin.fail:
                 msg: >-
-                  ct_ip={{ ct_ip }}/ct_gateway={{ ct_gateway }} was set explicitly but the container's eth0
-                  never got that address - check it's actually free and correct for this host's network.
-              when: ct_ip | length > 0
+                  DHCP failed for this container and the automatic static-IP fallback couldn't
+                  determine this host's own default route - pass ct_ip/ct_gateway explicitly.
+              when: host_default_route.stdout | trim | length == 0
 
-            - name: DHCP failed - auto-detect this host's subnet/gateway and pick a free static IP
-              block:
-                - name: Detect this host's default route
-                  # Deliberately NOT reading the bridge's own address -
-                  # confirmed live that a bridge (vmbr0) can have no IPv4
-                  # address of its own at all even though containers on it
-                  # reach the real LAN fine (this host's own management IP
-                  # lives on the physical eth0 NIC instead). The default
-                  # route is a much more reliable source: it works
-                  # regardless of which interface actually holds the
-                  # host's address.
-                  ansible.builtin.shell: |
-                    set -o pipefail
-                    ip -4 route show default
-                  args:
-                    executable: /bin/bash
-                  register: host_default_route
-                  changed_when: false
+            - name: Extract the gateway from the host's default route
+              ansible.builtin.shell: |
+                set -o pipefail
+                echo '{{ host_default_route.stdout }}' | grep -oP 'via \K\S+'
+              args:
+                executable: /bin/bash
+              register: detected_gateway_result
+              changed_when: false
 
-                - name: Fail clearly if the host's own network info couldn't be determined
-                  ansible.builtin.fail:
-                    msg: >-
-                      DHCP failed for this container and the automatic static-IP fallback couldn't
-                      determine this host's own default route - pass ct_ip/ct_gateway explicitly.
-                  when: host_default_route.stdout | trim | length == 0
+            - name: Extract this host's own source IP from its default route
+              ansible.builtin.shell: |
+                set -o pipefail
+                echo '{{ host_default_route.stdout }}' | grep -oP 'src \K\S+'
+              args:
+                executable: /bin/bash
+              register: detected_host_ip_result
+              changed_when: false
 
-                - name: Extract the gateway from the host's default route
-                  ansible.builtin.shell: |
-                    set -o pipefail
-                    echo '{{ host_default_route.stdout }}' | grep -oP 'via \K\S+'
-                  args:
-                    executable: /bin/bash
-                  register: detected_gateway_result
-                  changed_when: false
+            - name: Fail clearly if the gateway or host IP couldn't be parsed out of the route
+              ansible.builtin.fail:
+                msg: >-
+                  Couldn't parse a gateway/source IP out of this host's default route
+                  ({{ host_default_route.stdout | trim }}) - pass ct_ip/ct_gateway explicitly.
+              when: detected_gateway_result.stdout | trim | length == 0 or detected_host_ip_result.stdout | trim | length == 0
 
-                - name: Extract this host's own source IP from its default route
-                  ansible.builtin.shell: |
-                    set -o pipefail
-                    echo '{{ host_default_route.stdout }}' | grep -oP 'src \K\S+'
-                  args:
-                    executable: /bin/bash
-                  register: detected_host_ip_result
-                  changed_when: false
+            - name: Set the detected gateway and host IP facts
+              ansible.builtin.set_fact:
+                detected_gateway: "{{ detected_gateway_result.stdout | trim }}"
+                detected_host_ip: "{{ detected_host_ip_result.stdout | trim }}"
 
-                - name: Fail clearly if the gateway or host IP couldn't be parsed out of the route
-                  ansible.builtin.fail:
-                    msg: >-
-                      Couldn't parse a gateway/source IP out of this host's default route
-                      ({{ host_default_route.stdout | trim }}) - pass ct_ip/ct_gateway explicitly.
-                  when: detected_gateway_result.stdout | trim | length == 0 or detected_host_ip_result.stdout | trim | length == 0
+            - name: Compute the subnet base for candidate addresses
+              # Assumes a /24-style LAN (by far the most common
+              # home/office setup, confirmed on this host) - both for
+              # generating last-octet candidates to probe and for the
+              # real container config below, since there's no interface
+              # address here to read a real prefix length from.
+              ansible.builtin.set_fact:
+                static_ip_base: "{{ (detected_host_ip | split('.'))[:3] | join('.') }}"
+                static_ip_prefix: "24"
 
-                - name: Set the detected gateway and host IP facts
-                  ansible.builtin.set_fact:
-                    detected_gateway: "{{ detected_gateway_result.stdout | trim }}"
-                    detected_host_ip: "{{ detected_host_ip_result.stdout | trim }}"
+            - name: Probe candidate addresses near the top of the subnet for one that's free
+              ansible.builtin.command: ping -c 1 -W 1 {{ static_ip_base }}.{{ item }}
+              register: ping_probe
+              failed_when: false
+              changed_when: false
+              loop: "{{ range(240, 251) | list }}"
 
-                - name: Compute the subnet base for candidate addresses
-                  # Assumes a /24-style LAN (by far the most common
-                  # home/office setup, confirmed on this host) - both for
-                  # generating last-octet candidates to probe and for the
-                  # real container config below, since there's no interface
-                  # address here to read a real prefix length from.
-                  ansible.builtin.set_fact:
-                    static_ip_base: "{{ (detected_host_ip | split('.'))[:3] | join('.') }}"
-                    static_ip_prefix: "24"
+            - name: Collect addresses that didn't respond to ping (free candidates)
+              ansible.builtin.set_fact:
+                free_ip_candidates: "{{ ping_probe.results | selectattr('rc', 'ne', 0) | map(attribute='item') | list }}"
 
-                - name: Probe candidate addresses near the top of the subnet for one that's free
-                  ansible.builtin.command: ping -c 1 -W 1 {{ static_ip_base }}.{{ item }}
-                  register: ping_probe
-                  failed_when: false
-                  changed_when: false
-                  loop: "{{ range(240, 251) | list }}"
+            - name: Fail clearly if no free address was found in the probed range
+              ansible.builtin.fail:
+                msg: >-
+                  DHCP failed and no free address was found in {{ static_ip_base }}.240-250 for the
+                  automatic static-IP fallback - pass ct_ip/ct_gateway explicitly with a known-free address.
+              when: free_ip_candidates | length == 0
 
-                - name: Collect addresses that didn't respond to ping (free candidates)
-                  ansible.builtin.set_fact:
-                    free_ip_candidates: "{{ ping_probe.results | selectattr('rc', 'ne', 0) | map(attribute='item') | list }}"
+            - name: Read back this container's current MAC address
+              ansible.builtin.shell: |
+                set -o pipefail
+                grep '^net0' /etc/pve/lxc/{{ ctid }}.conf | grep -oP 'hwaddr=\K[0-9A-Fa-f:]+'
+              args:
+                executable: /bin/bash
+              register: ct_hwaddr
+              changed_when: false
 
-                - name: Fail clearly if no free address was found in the probed range
-                  ansible.builtin.fail:
-                    msg: >-
-                      DHCP failed and no free address was found in {{ static_ip_base }}.240-250 for the
-                      automatic static-IP fallback - pass ct_ip/ct_gateway explicitly with a known-free address.
-                  when: free_ip_candidates | length == 0
+            - name: Apply the auto-picked static IP to the container
+              ansible.builtin.set_fact:
+                auto_static_ip: "{{ static_ip_base }}.{{ free_ip_candidates | first }}"
 
-                - name: Read back this container's current MAC address
-                  ansible.builtin.shell: |
-                    set -o pipefail
-                    grep '^net0' /etc/pve/lxc/{{ ctid }}.conf | grep -oP 'hwaddr=\K[0-9A-Fa-f:]+'
-                  args:
-                    executable: /bin/bash
-                  register: ct_hwaddr
-                  changed_when: false
+            - name: Reconfigure the container's network with the auto-picked static IP
+              ansible.builtin.command: >-
+                pct set {{ ctid }} --net0
+                name=eth0,bridge={{ resolved_bridge }},hwaddr={{ ct_hwaddr.stdout | trim }},ip={{ auto_static_ip }}/{{ static_ip_prefix }},gw={{ detected_gateway }}
+              changed_when: true
 
-                - name: Apply the auto-picked static IP to the container
-                  ansible.builtin.set_fact:
-                    auto_static_ip: "{{ static_ip_base }}.{{ free_ip_candidates | first }}"
+            - name: Restart networking inside the container to pick up the static IP
+              ansible.builtin.command: pct exec {{ ctid }} -- systemctl restart systemd-networkd
+              changed_when: true
 
-                - name: Reconfigure the container's network with the auto-picked static IP
-                  ansible.builtin.command: >-
-                    pct set {{ ctid }} --net0
-                    name=eth0,bridge={{ resolved_bridge }},hwaddr={{ ct_hwaddr.stdout | trim }},ip={{ auto_static_ip }}/{{ static_ip_prefix }},gw={{ detected_gateway }}
-                  changed_when: true
+            - name: Verify the auto-picked static IP actually came up
+              ansible.builtin.command: pct exec {{ ctid }} -- ip -4 -o addr show eth0
+              register: ct_ipv4_retry
+              until: ct_ipv4_retry.rc == 0 and ct_ipv4_retry.stdout | trim | length > 0
+              retries: 6
+              delay: 5
+              changed_when: false
 
-                - name: Restart networking inside the container to pick up the static IP
-                  ansible.builtin.command: pct exec {{ ctid }} -- systemctl restart systemd-networkd
-                  changed_when: true
+    - name: Install the app inside the container as an apt package
+      # Runs every time, not just for brand-new containers - confirmed
+      # live: a prior run's install could get stuck/interrupted while the
+      # network was down, leaving the container reused-by-name but with
+      # the app never actually finished installing. apt-get install is
+      # itself idempotent (a safe no-op if already correctly installed),
+      # so always attempting it here fixes a broken prior install instead
+      # of silently trusting that a name match means a healthy app.
+      when: resolved_app_install_script | length == 0
+      ansible.builtin.command: >-
+        pct exec {{ ctid }} -- bash -c "apt-get update && apt-get install -y curl {{ app_choice }}"
+      changed_when: true
 
-                - name: Verify the auto-picked static IP actually came up
-                  ansible.builtin.command: pct exec {{ ctid }} -- ip -4 -o addr show eth0
-                  register: ct_ipv4_retry
-                  until: ct_ipv4_retry.rc == 0 and ct_ipv4_retry.stdout | trim | length > 0
-                  retries: 6
-                  delay: 5
-                  changed_when: false
+    - name: Install the app inside the container via a custom install script
+      # Runs whatever resolved_app_install_script ended up as (catalog
+      # entry or explicit app_install_script override) verbatim - trusted
+      # Survey/operator input, same trust model as tailscale_authkey and
+      # docker_apps.yml's app_command/app_extra_compose elsewhere in this
+      # repo. Also runs every time, same reasoning as the apt-install task above.
+      when: resolved_app_install_script | length > 0
+      ansible.builtin.command: >-
+        pct exec {{ ctid }} -- bash -c "apt-get update && apt-get install -y curl && {{ resolved_app_install_script }}"
+      changed_when: true
 
-        - name: Install the app inside the container as an apt package
-          when: resolved_app_install_script | length == 0
-          ansible.builtin.command: >-
-            pct exec {{ ctid }} -- bash -c "apt-get update && apt-get install -y curl {{ app_choice }}"
-          changed_when: true
+    - name: Run the app's post-install command, if provided
+      when: resolved_app_post_install_script | length > 0
+      ansible.builtin.command: pct exec {{ ctid }} -- bash -c "{{ resolved_app_post_install_script }}"
+      changed_when: true
 
-        - name: Install the app inside the container via a custom install script
-          # Runs whatever resolved_app_install_script ended up as (catalog
-          # entry or explicit app_install_script override) verbatim -
-          # trusted Survey/operator input, same trust model as
-          # tailscale_authkey and docker_apps.yml's app_command/
-          # app_extra_compose elsewhere in this repo.
-          when: resolved_app_install_script | length > 0
-          ansible.builtin.command: >-
-            pct exec {{ ctid }} -- bash -c "apt-get update && apt-get install -y curl && {{ resolved_app_install_script }}"
-          changed_when: true
+    - name: Render the Tailscale join script content (matches post_boot.sh's proven flags)
+      ansible.builtin.set_fact:
+        tailscale_join_script: "{{ lookup('template', playbook_dir + '/templates/tailscale-join.sh.j2') }}"
+      vars:
+        tailscale_hostname: "{{ ct_name }}"
+      no_log: true
 
-        - name: Run the app's post-install command, if provided
-          when: resolved_app_post_install_script | length > 0
-          ansible.builtin.command: pct exec {{ ctid }} -- bash -c "{{ resolved_app_post_install_script }}"
-          changed_when: true
+    - name: Stage the join script on the Proxmox host
+      ansible.builtin.copy:
+        content: "{{ tailscale_join_script }}"
+        dest: "/tmp/{{ ct_name }}-tailscale-join.sh"
+        mode: "0700"
+      no_log: true
 
-        - name: Render the Tailscale join script content (matches post_boot.sh's proven flags)
-          ansible.builtin.set_fact:
-            tailscale_join_script: "{{ lookup('template', playbook_dir + '/templates/tailscale-join.sh.j2') }}"
-          vars:
-            tailscale_hostname: "{{ ct_name }}"
-          no_log: true
+    - name: Push the join script into the container
+      ansible.builtin.command: pct push {{ ctid }} /tmp/{{ ct_name }}-tailscale-join.sh /root/tailscale-join.sh --perms 700
+      changed_when: true
 
-        - name: Stage the join script on the Proxmox host
-          ansible.builtin.copy:
-            content: "{{ tailscale_join_script }}"
-            dest: "/tmp/{{ ct_name }}-tailscale-join.sh"
-            mode: "0700"
-          no_log: true
+    - name: Remove the staged script from the Proxmox host
+      ansible.builtin.file:
+        path: "/tmp/{{ ct_name }}-tailscale-join.sh"
+        state: absent
 
-        - name: Push the join script into the container
-          ansible.builtin.command: pct push {{ ctid }} /tmp/{{ ct_name }}-tailscale-join.sh /root/tailscale-join.sh --perms 700
-          changed_when: true
-
-        - name: Remove the staged script from the Proxmox host
-          ansible.builtin.file:
-            path: "/tmp/{{ ct_name }}-tailscale-join.sh"
-            state: absent
-
-        - name: Start the Tailscale join script inside the container as a transient systemd unit
-          # nohup/disown don't reliably survive `pct exec` (lxc-attach) ending its session -
-          # the container runtime can clean up the whole process scope tied to that exec
-          # call regardless. systemd-run hands the process to PID 1 instead, which is
-          # independent of this exec session and can't be killed by it.
-          ansible.builtin.command: >-
-            pct exec {{ ctid }} -- systemd-run --unit=tailscale-join --collect --no-block /root/tailscale-join.sh
-          changed_when: true
-          no_log: true
+    - name: Start the Tailscale join script inside the container as a transient systemd unit
+      # nohup/disown don't reliably survive `pct exec` (lxc-attach) ending its session -
+      # the container runtime can clean up the whole process scope tied to that exec
+      # call regardless. systemd-run hands the process to PID 1 instead, which is
+      # independent of this exec session and can't be killed by it. Also runs every
+      # time - tailscale up is itself idempotent (safe no-op if already joined).
+      ansible.builtin.command: >-
+        pct exec {{ ctid }} -- systemd-run --unit=tailscale-join --collect --no-block /root/tailscale-join.sh
+      changed_when: true
+      no_log: true
 
     - name: Check (briefly) whether the container is already reachable over the tailnet
       ansible.builtin.wait_for:
