@@ -130,9 +130,16 @@
       # "local:100/vm-100-disk-0.raw") - the real answer varies by storage
       # type/backend, so read it back rather than hardcoding a format that
       # only happens to match LVM-thin.
+      # Real output confirmed live: "unusedN: successfully imported disk
+      # '<volid>'" - the unusedN label comes first on the line (not
+      # embedded in the quotes), lowercase "successfully", no "as", and
+      # the quoted volid itself has no unusedN prefix at all. An earlier
+      # version of this pattern assumed the opposite layout and captured
+      # the wrong span of text entirely - fixed against the real line,
+      # not assumption.
       ansible.builtin.shell: |
         set -o pipefail
-        qm importdisk {{ template_id }} {{ remote_image_file }} {{ resolved_storage }} | grep -oP "unused0:\K[^']+"
+        qm importdisk {{ template_id }} {{ remote_image_file }} {{ resolved_storage }} | grep -oP "successfully imported disk '\K[^']+"
       args:
         executable: /bin/bash
       register: importdisk_result
