@@ -140,6 +140,7 @@ Creates an LXC container directly on Proxmox (no VM layer), installs a chosen ap
 |---|---|---|
 | `nginx` | Installed via apt | `80` |
 | `ollama` | Installed via Ollama's own installer (handles the `zstd` dependency automatically), then pulls `llama3.2:1b` so it's immediately usable | `11434` |
+| `localai` | Architecture-detected binary downloaded directly from LocalAI's GitHub releases (their own install script has a known upstream bug, so this bypasses it), then runs `llama3.2:1b` via Ollama's model-registry format. **Not yet live-tested end to end** — added but unverified on real hardware, unlike the other catalog entries. | `8080` |
 | anything else | Installed via apt using `app_choice` as the package name (e.g. `redis-server`, `postgresql`) | `80` |
 
 `expose_port` is filled in automatically from this table and never needs to be specified for a catalog app — only set it explicitly to override.

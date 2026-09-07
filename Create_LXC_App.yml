@@ -62,6 +62,34 @@
           systemctl daemon-reload && systemctl restart ollama && sleep 2 && ollama pull llama3.2:1b
         default_port: 11434
 
+      localai:
+        # LocalAI's own install.sh has a known open bug (upstream issue
+        # #8032, produces broken installs) - using the documented binary
+        # download instead: architecture detected via uname -m, latest
+        # release tag resolved via GitHub's API, matching asset
+        # downloaded directly. Confirmed real asset names via the GitHub
+        # API (mudler/LocalAI releases): local-ai-<tag>-linux-arm64 and
+        # -amd64. NOT YET LIVE-TESTED end-to-end on real hardware, unlike
+        # ollama above - treat this as the next real trial, not a proven
+        # path. No literal double-quote characters anywhere in either
+        # script below - required, since this whole value gets embedded
+        # inside an outer bash -c "..." wrapper that Ansible's command
+        # module parses with shell-style quoting rules; a literal "
+        # would break argument splitting the same way it would in any
+        # double-quoted shell string.
+        install_script: >-
+          ARCH=$(uname -m); [ $ARCH = aarch64 ] && ARCH=arm64 || ARCH=amd64;
+          TAG=$(curl -fsSL https://api.github.com/repos/mudler/LocalAI/releases/latest | grep -oP 'v[0-9]+\.[0-9]+\.[0-9]+' | head -1);
+          curl -fsSL -o /usr/local/bin/local-ai https://github.com/mudler/LocalAI/releases/download/$TAG/local-ai-$TAG-linux-$ARCH;
+          chmod +x /usr/local/bin/local-ai
+        # Reuses the same small model already proven to run reasonably on
+        # constrained CPU-only ARM hardware via Ollama - LocalAI can pull
+        # directly from Ollama's own model registry format.
+        post_install_script: >-
+          printf '[Unit]\nDescription=LocalAI\n[Service]\nExecStart=/usr/local/bin/local-ai run ollama://llama3.2:1b\nRestart=always\nRestartSec=5\n[Install]\nWantedBy=multi-user.target\n' > /etc/systemd/system/local-ai.service;
+          systemctl daemon-reload; systemctl enable --now local-ai
+        default_port: 8080
+
     app_choice: "nginx"                      # From AWX Survey - a catalog name above, or any apt package name
     # Advanced/escape hatch - leave blank to use the catalog entry above (if
     # app_choice matches one) or a plain apt package install otherwise. Set
