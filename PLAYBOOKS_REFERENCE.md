@@ -120,7 +120,11 @@ Ensures the requested OS template exists on Proxmox (builds it on first use, reu
 
 Creates an LXC container directly on Proxmox (no VM layer), installs a chosen app inside it, and joins it to the tailnet. Re-running with the same `ct_name` reuses the existing container (e.g. to flip `expose_to_internet` on later) instead of creating a duplicate.
 
-**Connects to:** the Proxmox host directly (`pct`, `pveam`, `pvesh` commands).
+**Two ways to put an app in the container — pick one per launch:**
+1. **Native** (`app_choice`/catalog, described below) — the container's only job is running that one app directly on the OS. Default behavior, unchanged.
+2. **Docker** (`docker_apps`, same schema as [Install Docker And App](#4-install-docker-and-app--install_docker_and_appyml)) — the container runs Docker instead, and you deploy any number of containers into it by image name, exactly like the VM playbook already does. **This is the one that needs zero code changes for a genuinely new app** — anything with a published Docker image (which is nearly everything) just needs an image name, no catalog entry, no custom install script, ever. Set `docker_apps` to a non-empty list to use this path; leave it empty (default) for native installs. See section 4 below for the full field list, catalog presets, and exposure model — it's identical here.
+
+**Connects to:** the Proxmox host directly (`pct`, `pveam`, `pvesh` commands) for container creation; if `docker_apps` is set, also directly over SSH to the container itself (over the tailnet) to install Docker and deploy the apps — the same connection pattern Install Docker And App uses for a VM. This means the `docker_apps` path needs the container to already be Tailscale-approved before it can proceed (unlike the native path, which uses `pct exec` from the Proxmox host and never needs tailnet connectivity at all) — if approval is still pending, that step fails clearly rather than hanging; re-run once approved.
 
 ### Simple — the UI's default form should only need these
 
@@ -157,6 +161,8 @@ Creates an LXC container directly on Proxmox (no VM layer), installs a chosen ap
 | `ct_gateway` | string | no | `""` | Gateway IP for the subnet in `ct_ip`. Required together with `ct_ip`; the job fails fast with a clear message if only one of the two is set. |
 | `app_install_script` | string | no | `""` | Escape hatch for a one-off app not worth adding to the catalog — any shell command, overrides both the catalog and the plain apt install entirely. Requires real shell/install knowledge; don't expose this as a plain text field to a normal end user — if you need it often enough, add a catalog entry in the playbook instead. |
 | `app_post_install_script` | string | no | `""` | Shell command that runs once after install, alongside `app_install_script` above. Same caveat — power-user field, not normal-user input. |
+| `docker_apps` | array of objects | no | `[]` | Switches this container to the Docker deployment path — same schema as [Install Docker And App's `docker_apps`](#4-install-docker-and-app--install_docker_and_appyml) (catalog presets, custom images, exposure model, all identical). Non-empty means Docker instead of a native app; `app_choice`/`app_install_script`/`app_post_install_script`/the native exposure block are all skipped. This is the path to use for a genuinely new app with no catalog entry — pass an image name, no code change needed. |
+| `wordpress_db_password` | string (secret) | conditional | `""` | Required only if `wordpress` is one of the `docker_apps` entries |
 | `gpu_passthrough` | boolean | no | `false` | Passes the Proxmox host's DRM render nodes (`/dev/dri`) into the container, and additionally its Mali GPU (`/dev/mali0`) if present — both detected automatically each run, skipped harmlessly (with a warning in the job output) on a host with neither. The `/dev/dri` half is generic, not ARM-specific — confirmed live: an amd64 host with its own (non-Mali) GPU got its DRI devices passed through correctly too, side by side with a Mali-equipped ARM host in the same run. Only the `/dev/mali0` detection is CIX/ARM-specific; NVIDIA/AMD-specific passthrough (e.g. `/dev/nvidia*`) isn't implemented. Getting a device into the container is not the same as an app being able to use it for acceleration — that also needs a matching userspace driver inside the container (a Mali Vulkan driver, in the ARM case), which this does not install. |
 | `tailscale_tag` | string | no | `"tag:lxc-host"` | Tailscale ACL tag applied at join time |
 
@@ -203,6 +209,22 @@ The install script, post-install model pull, and `expose_port: 11434` all come f
 ```
 `ct_ip`/`ct_gateway` aren't needed here either, even on a host with an unreliable DHCP pool — the job auto-recovers on its own (see behavior notes below). They're left in the Advanced table only as a rare explicit override, not something this example needs.
 
+### Example `extra_vars` — Docker path (any image, zero code changes)
+
+```json
+{
+  "ct_name": "docker-lxc01",
+  "memory": 2048,
+  "cores": 2,
+  "ct_disk_gb": 16,
+  "docker_apps": [
+    { "name": "nginx", "path_prefix": "/" }
+  ],
+  "expose_to_internet": true
+}
+```
+`app_choice` is omitted entirely here — `docker_apps` being non-empty is itself what switches this container from "run one native app" to "run Docker, deploy these images." Swap `docker_apps` for anything else with a published image (`ollama/ollama`, `localai/localai`, a database, a custom app) and it works identically — see section 4 for the full field list and catalog presets.
+
 ### Behavior notes
 
 - Same tailnet-approval caveat as Create VM: the job doesn't block waiting for approval.
@@ -213,6 +235,7 @@ The install script, post-install model pull, and `expose_port: 11434` all come f
 - **A relaunch self-repairs a container left broken by a prior interrupted run.** Only template staging/`pct create`/TUN/GPU config are skipped for an existing container by name — starting the container if stopped, network readiness (DHCP + static-IP fallback), app install, and the Tailscale join all run on *every* invocation, not just for brand-new containers. Confirmed live: an app install that got stuck mid-way while the network was down left a container half-configured (service never started) with the job still reporting success; relaunching the same job now re-verifies and fixes that instead of silently trusting the container's name. You only need to `pct stop <ctid> && pct destroy <ctid>` manually if the container itself is fundamentally broken (e.g. wrong rootfs) — a stalled install or network is fixed by just relaunching.
 - **DHCP failure self-heals automatically, no `ct_ip`/`ct_gateway` needed.** The job tries DHCP first; if a container's `eth0` never gets an IPv4 address after retrying, it auto-detects this host's own subnet/gateway (from its routing table), probes a handful of addresses near the top of that range, and applies the first free one as a static IP — confirmed as a real failure mode live (a container's DHCP requests reached the bridge fine but got zero responses because the router's pool was full). `ct_ip`/`ct_gateway` still exist to force one specific known-good address, but nobody — admin or end user — needs to supply network details for the normal/recovery path.
 - `storage`/`template_storage`/`bridge` are all validated against the host every run and auto-corrected if wrong or unset — this is deliberately not just a "blank means auto-detect" check. A stale AWX Survey default (confirmed live: `storage: local-lvm` kept getting sent from an old saved value on a host that doesn't have `local-lvm` at all) is treated exactly like an unset field — the playbook always checks the real host and corrects to a valid answer rather than trusting whatever value it was handed. A warning appears in the job output whenever a correction happens, showing what was requested vs. what's actually available.
+- **`docker_apps` (non-empty) is the path for a genuinely new app that isn't a plain apt package** — no catalog entry needed, ever, unlike `app_install_script`. Reuses the exact same deployment logic (`deploy_docker_apps_block.yml`) as Install Docker And App, over SSH to the container itself once it's Tailscale-approved. **Not yet live-tested end to end** at the time this was written — the mechanics (shared task file, `add_host`/`hosts` conditional-play pattern, Tailscale SSH reachability) are all individually proven elsewhere in this repo, but this specific combination is new.
 - **Verified working side by side on both amd64 and arm64 Proxmox hosts** — template selection/download, DHCP (with the static-IP self-heal available if it's ever needed), and GPU passthrough (correctly discriminating real hardware per host, not architecture) have all been confirmed live with the exact same `extra_vars` launched against both at once.
 
 ---
