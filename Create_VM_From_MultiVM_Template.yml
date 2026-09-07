@@ -136,7 +136,16 @@
                  else ('vmbr0' if 'vmbr0' in host_bridges.stdout_lines else host_bridges.stdout_lines | first) }}
 
     - name: Ensure the requested OS template exists
+      # create_template_block.yml expects current_os_type - that name comes
+      # from Create_MultiVM_Template.yml's loop (loop_control: loop_var:
+      # current_os_type), a separate wrapper for pre-seeding several
+      # templates at once. This playbook calls the same shared task file
+      # directly, not in a loop, and never wired that variable through -
+      # a genuine pre-existing gap, confirmed live ("current_os_type is
+      # undefined"), not something introduced by today's changes.
       ansible.builtin.include_tasks: create_template_block.yml
+      vars:
+        current_os_type: "{{ os_type }}"
 
     - name: Check whether a VM with this name already exists
       ansible.builtin.shell: |
