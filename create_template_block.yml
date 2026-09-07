@@ -3,9 +3,12 @@
 # Leaves `template_id` and `template_name` set in the parent scope either way.
 
 - name: Set template name and image URL for {{ current_os_type }}
+  # image_url substitutes this host's target_arch for the "amd64" embedded
+  # in every vars/os_images.yml URL - a no-op on an amd64 host (existing
+  # behavior unchanged), swaps in the real arm64 variant on an arm64 host.
   ansible.builtin.set_fact:
     template_name: "{{ os_image_lookup[current_os_type]['name'] }}"
-    image_url: "{{ os_image_lookup[current_os_type]['url'] }}"
+    image_url: "{{ os_image_lookup[current_os_type]['url'] | replace('amd64', target_arch) }}"
 
 - name: Check whether this template already exists on the Proxmox host
   ansible.builtin.shell: |

@@ -27,6 +27,18 @@
 
     os_type: "ubuntu-24.04"               # From AWX Survey - any key from vars/os_images.yml (ubuntu-24.04 | ubuntu-22.04 | debian-12)
 
+    # Multi-arch support: vars/os_images.yml's URLs are all written for
+    # amd64 (Ubuntu/Debian's publishing convention embeds the arch name in
+    # the filename, e.g. noble-server-cloudimg-amd64.img). On an amd64 host
+    # this is a no-op substitution (amd64 -> amd64), so existing behavior
+    # is completely unchanged there - on an arm64 host it swaps in the
+    # genuinely-published arm64 variant at the same predictable path,
+    # mirroring the same pattern already proven for LXC templates.
+    vm_arch_map:
+      x86_64: amd64
+      aarch64: arm64
+    target_arch: "{{ vm_arch_map[ansible_architecture] | default(ansible_architecture) }}"
+
     vm_name: "dev-vm01"                    # From AWX Survey
     vm_user: "pronto"                      # From AWX Survey - standard automation user, matches post_boot.sh's baremetal convention
     memory: 2048                            # From AWX Survey
