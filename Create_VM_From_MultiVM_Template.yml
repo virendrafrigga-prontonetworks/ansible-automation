@@ -167,15 +167,31 @@
       register: existing_vm_config
       changed_when: false
 
+    - name: Stop the existing VM before destroying it, if it's not actually finished
+      # qm destroy refuses to touch a running VM - confirmed live ("VM 101
+      # is running - destroy failed"). A broken/diskless VM can still be
+      # left running (it was started, just never got a working disk), so
+      # stop it first rather than assuming a leftover is always stopped.
+      when: >-
+        existing_vm.stdout | trim | length > 0 and 'scsi0:' not in existing_vm_config.stdout
+      ansible.builtin.command: qm stop {{ existing_vm.stdout | trim }}
+      failed_when: false
+      changed_when: true
+
     - name: Destroy an existing VM that never actually finished cloning
       # Same idempotency gap as the template check above and the LXC side
       # earlier - a name match alone can't tell a genuinely working clone
       # from one produced while the source template was still broken (no
       # real disk). Verify it actually has a disk before trusting it.
+      # Retries because qm stop above doesn't block until the VM is fully
+      # powered off - destroy can still transiently see it as running.
       when: >-
         existing_vm.stdout | trim | length > 0 and 'scsi0:' not in existing_vm_config.stdout
       ansible.builtin.command: qm destroy {{ existing_vm.stdout | trim }} --purge
       register: destroyed_incomplete_vm
+      until: destroyed_incomplete_vm.rc == 0
+      retries: 6
+      delay: 5
       changed_when: true
 
     - name: Clone and configure the VM if one with this name doesn't already exist (or was just destroyed for being incomplete)

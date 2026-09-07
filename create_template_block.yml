@@ -30,6 +30,18 @@
   register: existing_template_config
   changed_when: false
 
+- name: Stop the existing template before destroying it, if it's not actually finished
+  # qm destroy refuses to touch a running VM ("VM is running - destroy
+  # failed", confirmed live one level up on the VM-clone side) - a
+  # broken/incomplete template shell could in principle still be left
+  # running too, so stop it first rather than assuming it's always stopped.
+  when: >-
+    existing_template.stdout | trim | length > 0 and
+    ('agent: 1' not in existing_template_config.stdout or 'scsi0:' not in existing_template_config.stdout)
+  ansible.builtin.command: qm stop {{ existing_template.stdout | trim }}
+  failed_when: false
+  changed_when: true
+
 - name: Destroy an existing template that never actually finished building
   # A name match alone can't tell a genuinely finished template from a
   # half-built leftover - confirmed live: an earlier run can fail partway
@@ -39,11 +51,15 @@
   # reused that broken shell instead of rebuilding it, producing clones
   # with no disk at all. Same idempotency gap already fixed on the LXC
   # side - verify actual completeness, not just that the name matches.
+  # Retries because qm stop above doesn't block until fully powered off.
   when: >-
     existing_template.stdout | trim | length > 0 and
     ('agent: 1' not in existing_template_config.stdout or 'scsi0:' not in existing_template_config.stdout)
   ansible.builtin.command: qm destroy {{ existing_template.stdout | trim }} --purge
   register: destroyed_incomplete_template
+  until: destroyed_incomplete_template.rc == 0
+  retries: 6
+  delay: 5
   changed_when: true
 
 - name: Build and register the template if it doesn't already exist (or was just destroyed for being incomplete)
