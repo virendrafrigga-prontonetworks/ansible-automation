@@ -100,14 +100,38 @@
         creates: "/etc/pve/qemu-server/{{ template_id }}.conf"
 
     - name: Import disk to storage
-      ansible.builtin.command: qm importdisk {{ template_id }} {{ remote_image_file }} {{ resolved_storage }}
+      # Capture Proxmox's own reported volume ID instead of guessing one -
+      # confirmed live: "{{ resolved_storage }}:vm-{{ template_id }}-disk-0"
+      # (LVM-thin naming) fails outright on directory-type storage like
+      # "local" ("unable to parse directory volume name"), because
+      # importdisk actually names the file differently there (e.g.
+      # "local:100/vm-100-disk-0.raw") - the real answer varies by storage
+      # type/backend, so read it back rather than hardcoding a format that
+      # only happens to match LVM-thin.
+      ansible.builtin.shell: |
+        set -o pipefail
+        qm importdisk {{ template_id }} {{ remote_image_file }} {{ resolved_storage }} | grep -oP "unused0:\K[^']+"
+      args:
+        executable: /bin/bash
+      register: importdisk_result
       changed_when: true
+
+    - name: Fail clearly if the imported disk's volume ID couldn't be determined
+      ansible.builtin.fail:
+        msg: >-
+          qm importdisk didn't report a parseable volume ID - check its output on the host directly
+          for {{ template_id }} on storage '{{ resolved_storage }}'.
+      when: importdisk_result.stdout | trim | length == 0
+
+    - name: Set the actual imported disk volume ID
+      ansible.builtin.set_fact:
+        imported_disk_volid: "{{ importdisk_result.stdout | trim }}"
 
     - name: Configure VM hardware for disk
       ansible.builtin.command: >-
         qm set {{ template_id }}
         --scsihw virtio-scsi-pci
-        --scsi0 {{ resolved_storage }}:vm-{{ template_id }}-disk-0
+        --scsi0 {{ imported_disk_volid }}
       changed_when: true
 
     - name: Configure VM hardware for cloud-init
