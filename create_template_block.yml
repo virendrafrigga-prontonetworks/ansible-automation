@@ -24,8 +24,30 @@
     template_id: "{{ existing_template.stdout | trim }}"
   when: existing_template.stdout | trim | length > 0
 
-- name: Build and register the template if it doesn't already exist
-  when: existing_template.stdout | trim | length == 0
+- name: Read the existing template's config, if found
+  when: existing_template.stdout | trim | length > 0
+  ansible.builtin.command: qm config {{ existing_template.stdout | trim }}
+  register: existing_template_config
+  changed_when: false
+
+- name: Destroy an existing template that never actually finished building
+  # A name match alone can't tell a genuinely finished template from a
+  # half-built leftover - confirmed live: an earlier run can fail partway
+  # through (e.g. the disk-attach bug fixed earlier) and still leave a
+  # VM shell that satisfies "does a template with this name exist?",
+  # with no real scsi0 disk and no agent: 1. Every later run silently
+  # reused that broken shell instead of rebuilding it, producing clones
+  # with no disk at all. Same idempotency gap already fixed on the LXC
+  # side - verify actual completeness, not just that the name matches.
+  when: >-
+    existing_template.stdout | trim | length > 0 and
+    ('agent: 1' not in existing_template_config.stdout or 'scsi0:' not in existing_template_config.stdout)
+  ansible.builtin.command: qm destroy {{ existing_template.stdout | trim }} --purge
+  register: destroyed_incomplete_template
+  changed_when: true
+
+- name: Build and register the template if it doesn't already exist (or was just destroyed for being incomplete)
+  when: existing_template.stdout | trim | length == 0 or destroyed_incomplete_template is changed
   block:
     - name: Set image filenames
       ansible.builtin.set_fact:
