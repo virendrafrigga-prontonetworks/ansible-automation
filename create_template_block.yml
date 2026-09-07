@@ -180,7 +180,15 @@
       changed_when: true
 
     - name: Configure VM hardware for cloud-init
-      ansible.builtin.command: qm set {{ template_id }} --ide2 {{ resolved_storage }}:cloudinit
+      # Confirmed live: --ide2 works fine on amd64 (pc/q35 machine type,
+      # has a legacy IDE controller) but fails outright on arm64 ("Bus
+      # 'ide.1' not found") - the "virt" machine type QEMU uses for aarch64
+      # has no IDE controller at all, a genuine hardware-model difference,
+      # not a Proxmox bug. scsi1 uses the same virtio-scsi-pci controller
+      # the root disk (scsi0) already attaches to successfully there.
+      ansible.builtin.command: >-
+        qm set {{ template_id }}
+        {{ '--scsi1' if target_arch == 'arm64' else '--ide2' }} {{ resolved_storage }}:cloudinit
       changed_when: true
 
     - name: Configure boot order
