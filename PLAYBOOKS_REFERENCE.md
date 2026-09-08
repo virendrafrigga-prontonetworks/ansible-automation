@@ -7,7 +7,7 @@ There are **7 playbooks** in three groups:
 | Group | Playbook | Purpose |
 |---|---|---|
 | Create | `Create_VM_From_MultiVM_Template.yml` | Create a VM on Proxmox, join it to the tailnet, optionally expose it publicly in the same run |
-| Create | `Create_LXC_App.yml` | Create an LXC container directly on Proxmox, join it to the tailnet, optionally expose it publicly in the same run |
+| Create | `Create_LXC_App.yml` | Create an LXC container directly on Proxmox with Docker installed and running, and join it to the tailnet — no app choice here; deploy apps onto it afterward with `Install_Docker_And_App.yml` |
 | Create | `Install_Docker_And_App.yml` | Install Docker on an existing VM and deploy one or more containers on it |
 | Expose | `Expose_App_To_Internet.yml` | Make an already-running service on a VM reachable from the public internet, without redeploying anything else |
 | Delete | `Delete_VM.yml` | Destroy a VM (and its underlying template, if you pass a template name) |
@@ -16,7 +16,7 @@ There are **7 playbooks** in three groups:
 
 All of them are idempotent by name — re-running a create playbook with the same name reuses/updates the existing resource instead of creating a duplicate; re-running a delete playbook against a name that doesn't exist is a harmless no-op.
 
-**Design principle: simple by default, capable when asked.** Each Create playbook's variables below are split into **Simple** (what a basic UI form needs — a handful of fields, sensible defaults) and **Advanced** (optional power-user knobs, left blank/default for the common case). Anything the playbook can determine by asking the Proxmox host itself — target architecture (amd64/arm64), storage backend availability, network bridge — is validated against that host **every run**, not just when the field is left blank, and auto-corrected if it's wrong. This matters in practice: a stale AWX Survey default, an old saved `extra_vars` blob, or a value copied from a different host are all just as invalid as never setting the field at all, and the playbook treats them the same way — check the real host, trust it over whatever was passed in. Anything that would otherwise require the caller to write a shell command or know infrastructure trivia (an app's install steps, its default port) is instead picked from a built-in catalog by a plain name (Create LXC's `app_choice`, Install Docker's `docker_apps[].name`) — raw scripting fields like `app_install_script` exist underneath as an admin/operator escape hatch, not something a normal end user should ever see as a text box. Build the UI's default form from the Simple tables and catalog names only; put Advanced fields behind a collapsed "Advanced" section, not the main flow.
+**Design principle: simple by default, capable when asked.** Each Create playbook's variables below are split into **Simple** (what a basic UI form needs — a handful of fields, sensible defaults) and **Advanced** (optional power-user knobs, left blank/default for the common case). Anything the playbook can determine by asking the Proxmox host itself — target architecture (amd64/arm64), storage backend availability, network bridge — is validated against that host **every run**, not just when the field is left blank, and auto-corrected if it's wrong. This matters in practice: a stale AWX Survey default, an old saved `extra_vars` blob, or a value copied from a different host are all just as invalid as never setting the field at all, and the playbook treats them the same way — check the real host, trust it over whatever was passed in. Anything that would otherwise require the caller to write a shell command or know infrastructure trivia (an app's install steps, its default port) is instead picked from a built-in catalog by a plain name (Install Docker's `docker_apps[].name`) — raw scripting fields exist underneath as an admin/operator escape hatch, not something a normal end user should ever see as a text box. Create LXC itself takes no app choice at all — it only creates the container and gets Docker running on it; app selection happens entirely in the later `Install_Docker_And_App.yml` step. Build the UI's default form from the Simple tables and catalog names only; put Advanced fields behind a collapsed "Advanced" section, not the main flow.
 
 ---
 
@@ -118,7 +118,7 @@ Ensures the requested OS template exists on Proxmox (builds it on first use, reu
 
 ## 3. Create LXC — `Create_LXC_App.yml`
 
-Creates an LXC container directly on Proxmox (no VM layer), installs a chosen app inside it, and joins it to the tailnet. Re-running with the same `ct_name` reuses the existing container (e.g. to flip `expose_to_internet` on later) instead of creating a duplicate.
+Creates an LXC container directly on Proxmox (no VM layer), installs Docker inside it (and whatever's needed for Docker to actually run — nesting, TUN passthrough), and joins it to the tailnet. **No app choice here at all** — this playbook only produces a Docker-ready container. Deploy an actual app onto it afterward with `Install_Docker_And_App.yml`, targeting this container by its `ct_name` (tailnet hostname) with `vm_user: "root"` (LXC's only user) — that playbook is purely SSH + Docker commands, so it works against an LXC container the same way it already does against a VM, unmodified. Re-running `Create_LXC_App.yml` with the same `ct_name` reuses the existing container instead of creating a duplicate.
 
 **Connects to:** the Proxmox host directly (`pct`, `pveam`, `pvesh` commands).
 
@@ -127,22 +127,10 @@ Creates an LXC container directly on Proxmox (no VM layer), installs a chosen ap
 | Variable | Type | Required | Default | Description |
 |---|---|---|---|---|
 | `ct_name` | string | yes | `"app-lxc01"` | Container name and tailnet hostname |
-| `app_choice` | string | no | `"nginx"` | A name from the built-in app catalog (currently `nginx`, `ollama`), or any apt package name for anything not in the catalog. A UI should present the catalog names as a dropdown/picker — no shell knowledge needed for those. |
-| `memory` | integer | no | `1024` | RAM in MB — for `ollama`, use at least `4096` |
+| `memory` | integer | no | `1024` | RAM in MB |
 | `cores` | integer | no | `1` | CPU cores |
-| `ct_disk_gb` | integer | no | `8` | Root filesystem size in GB (plain number, no unit suffix) — for `ollama`, use at least `20` |
-| `expose_to_internet` | boolean | no | `false` | If true, exposes the app publicly via Tailscale Funnel once approved |
+| `ct_disk_gb` | integer | no | `8` | Root filesystem size in GB (plain number, no unit suffix) |
 | `tailscale_authkey` | string (secret) | yes | — | Injected via the Tailscale Auth Key credential |
-
-### App catalog (built-in presets)
-
-| `app_choice` value | What happens | Default `expose_port` |
-|---|---|---|
-| `nginx` | Installed via apt | `80` |
-| `ollama` | Installed via Ollama's own installer (handles the `zstd` dependency automatically), then pulls `llama3.2:1b` so it's immediately usable | `11434` |
-| anything else | Installed via apt using `app_choice` as the package name (e.g. `redis-server`, `postgresql`) | `80` |
-
-`expose_port` is filled in automatically from this table and never needs to be specified for a catalog app — only set it explicitly to override.
 
 ### Advanced — leave blank/default unless you specifically need to override them
 
@@ -155,50 +143,30 @@ Creates an LXC container directly on Proxmox (no VM layer), installs a chosen ap
 | `ct_nameserver` | string | no | `"1.1.1.1"` | DNS resolver (unprivileged LXC containers don't reliably get DNS via DHCP) |
 | `ct_ip` | string | no | `""` | Leave blank (recommended for everyone, including admins). DHCP is tried first; if it genuinely fails, the job auto-detects the host's subnet/gateway and picks a free static IP itself — no one needs to supply network details. Only set this to force one specific known-good address. Must be set together with `ct_gateway`. |
 | `ct_gateway` | string | no | `""` | Gateway IP for the subnet in `ct_ip`. Required together with `ct_ip`; the job fails fast with a clear message if only one of the two is set. |
-| `app_install_script` | string | no | `""` | Escape hatch for a one-off app not worth adding to the catalog — any shell command, overrides both the catalog and the plain apt install entirely. Requires real shell/install knowledge; don't expose this as a plain text field to a normal end user — if you need it often enough, add a catalog entry in the playbook instead. |
-| `app_post_install_script` | string | no | `""` | Shell command that runs once after install, alongside `app_install_script` above. Same caveat — power-user field, not normal-user input. |
-| `gpu_passthrough` | boolean | no | `false` | Passes the Proxmox host's DRM render nodes (`/dev/dri`) into the container, and additionally its Mali GPU (`/dev/mali0`) if present — both detected automatically each run, skipped harmlessly (with a warning in the job output) on a host with neither. The `/dev/dri` half is generic, not ARM-specific — confirmed live: an amd64 host with its own (non-Mali) GPU got its DRI devices passed through correctly too, side by side with a Mali-equipped ARM host in the same run. Only the `/dev/mali0` detection is CIX/ARM-specific; NVIDIA/AMD-specific passthrough (e.g. `/dev/nvidia*`) isn't implemented. Getting a device into the container is not the same as an app being able to use it for acceleration — that also needs a matching userspace driver inside the container (a Mali Vulkan driver, in the ARM case), which this does not install. |
+| `gpu_passthrough` | boolean | no | `false` | Passes the Proxmox host's DRM render nodes (`/dev/dri`) into the container, and additionally its Mali GPU (`/dev/mali0`) if present — both detected automatically each run, skipped harmlessly (with a warning in the job output) on a host with neither. The `/dev/dri` half is generic, not ARM-specific — confirmed live: an amd64 host with its own (non-Mali) GPU got its DRI devices passed through correctly too, side by side with a Mali-equipped ARM host in the same run. Only the `/dev/mali0` detection is CIX/ARM-specific; NVIDIA/AMD-specific passthrough (e.g. `/dev/nvidia*`) isn't implemented. Getting a device into the container is not the same as an app being able to use it for acceleration — that also needs a matching userspace driver inside the container. |
 | `tailscale_tag` | string | no | `"tag:lxc-host"` | Tailscale ACL tag applied at join time |
 
-### Example `extra_vars` — simple case (plain nginx)
+### Example `extra_vars` — create a Docker-ready container
 
 ```json
 {
-  "ct_name": "app-lxc-01",
-  "app_choice": "nginx",
-  "memory": 1024,
-  "cores": 1,
-  "ct_disk_gb": 8,
-  "expose_to_internet": false
+  "ct_name": "docker-lxc01",
+  "memory": 2048,
+  "cores": 2,
+  "ct_disk_gb": 16
 }
 ```
-(`storage`/`template_storage`/`bridge`/`expose_port` etc. are all omitted — auto-detection and the app catalog cover the normal case entirely.)
-
-### Example `extra_vars` — Ollama, still just catalog fields, no shell knowledge needed
-
-```json
-{
-  "ct_name": "ollama-lxc01",
-  "app_choice": "ollama",
-  "memory": 4096,
-  "cores": 4,
-  "ct_disk_gb": 20,
-  "expose_to_internet": false
-}
-```
-The install script, post-install model pull, and `expose_port: 11434` all come from the catalog automatically — a normal user only ever picked `"ollama"` from a list.
+(`storage`/`template_storage`/`bridge` etc. are all omitted — auto-detection covers the normal case entirely.) Follow up with `Install_Docker_And_App.yml` using `target_host: "docker-lxc01"` and `vm_user: "root"` to actually deploy and expose an app.
 
 ### Example `extra_vars` — advanced case (GPU passthrough)
 
 ```json
 {
-  "ct_name": "ollama-gpu-lxc01",
-  "app_choice": "ollama",
+  "ct_name": "gpu-lxc01",
   "memory": 4096,
   "cores": 4,
   "ct_disk_gb": 20,
-  "gpu_passthrough": true,
-  "expose_to_internet": false
+  "gpu_passthrough": true
 }
 ```
 `ct_ip`/`ct_gateway` aren't needed here either, even on a host with an unreliable DHCP pool — the job auto-recovers on its own (see behavior notes below). They're left in the Advanced table only as a rare explicit override, not something this example needs.
@@ -206,14 +174,14 @@ The install script, post-install model pull, and `expose_port: 11434` all come f
 ### Behavior notes
 
 - Same tailnet-approval caveat as Create VM: the job doesn't block waiting for approval.
-- If `expose_to_internet: true`, a background script inside the container polls for approval and enables Funnel on its own once approved — check `/var/log/tailscale-funnel.log` inside the container for status. Only useful for services on `expose_port` that speak HTTP.
-- Adding a genuinely new app to the catalog (not just using `app_choice` as a raw apt package name) is a data-only edit to `lxc_app_catalog` in the playbook — no task logic to touch. `app_install_script`/`app_post_install_script` remain available directly for a true one-off that isn't worth cataloging; both run verbatim inside the container as root, so treat them as trusted operator/admin input, same as `tailscale_authkey` — never expose them as free-text fields to a normal end user.
+- No exposure handling lives in this playbook at all — there's no specific app installed here to expose. Deploy AND expose an app with `Install_Docker_And_App.yml` afterward (its own richer exposure model: path routing, multiple apps, `tcp_funnel_port`), targeting this container by `ct_name`/tailnet hostname with `vm_user: "root"`.
+- Docker install is idempotent and self-healing: it checks `docker --version` inside the container first and only runs `apt-get install` when that check fails, then unconditionally ensures the `docker` service is enabled and running — safe to re-run against an already-Docker-ready container.
 - `gpu_passthrough: true` gets the Mali/DRI devices into the container automatically — no manual `.conf` editing, ever. Every prior manual attempt at this on the Orange Pi host is what caused a container to fail to start (`newgidmap` rejecting a custom identity GID mapping); this playbook's version deliberately avoids that by relying on world-writable device bind-mount permissions instead.
-- **Idempotent by `ct_name`** (matching Create VM's behavior): if a container with that name already exists, this job skips template staging/creation entirely and reuses it — it only re-checks tailnet reachability and (re-)applies `expose_to_internet`. This is the intended way to make an already-running container public later: re-launch with the same `ct_name` and `expose_to_internet: true`, don't create a second container.
-- **A relaunch self-repairs a container left broken by a prior interrupted run.** Only template staging/`pct create`/TUN/GPU config are skipped for an existing container by name — starting the container if stopped, network readiness (DHCP + static-IP fallback), app install, and the Tailscale join all run on *every* invocation, not just for brand-new containers. Confirmed live: an app install that got stuck mid-way while the network was down left a container half-configured (service never started) with the job still reporting success; relaunching the same job now re-verifies and fixes that instead of silently trusting the container's name. You only need to `pct stop <ctid> && pct destroy <ctid>` manually if the container itself is fundamentally broken (e.g. wrong rootfs) — a stalled install or network is fixed by just relaunching.
+- **Idempotent by `ct_name`** (matching Create VM's behavior): if a container with that name already exists, this job skips template staging/creation entirely and reuses it — it only re-checks tailnet reachability, Docker's install state, and network readiness. This is the intended way to re-run against an already-existing container rather than creating a second one.
+- **A relaunch self-repairs a container left broken by a prior interrupted run.** Only template staging/`pct create`/TUN/GPU config are skipped for an existing container by name — starting the container if stopped, network readiness (DHCP + static-IP fallback), Docker install, and the Tailscale join all run on *every* invocation, not just for brand-new containers. You only need to `pct stop <ctid> && pct destroy <ctid>` manually if the container itself is fundamentally broken (e.g. wrong rootfs) — a stalled install or network is fixed by just relaunching.
 - **DHCP failure self-heals automatically, no `ct_ip`/`ct_gateway` needed.** The job tries DHCP first; if a container's `eth0` never gets an IPv4 address after retrying, it auto-detects this host's own subnet/gateway (from its routing table), probes a handful of addresses near the top of that range, and applies the first free one as a static IP — confirmed as a real failure mode live (a container's DHCP requests reached the bridge fine but got zero responses because the router's pool was full). `ct_ip`/`ct_gateway` still exist to force one specific known-good address, but nobody — admin or end user — needs to supply network details for the normal/recovery path.
 - `storage`/`template_storage`/`bridge` are all validated against the host every run and auto-corrected if wrong or unset — this is deliberately not just a "blank means auto-detect" check. A stale AWX Survey default (confirmed live: `storage: local-lvm` kept getting sent from an old saved value on a host that doesn't have `local-lvm` at all) is treated exactly like an unset field — the playbook always checks the real host and corrects to a valid answer rather than trusting whatever value it was handed. A warning appears in the job output whenever a correction happens, showing what was requested vs. what's actually available.
-- **Verified working side by side on both amd64 and arm64 Proxmox hosts** — template selection/download, DHCP (with the static-IP self-heal available if it's ever needed), and GPU passthrough (correctly discriminating real hardware per host, not architecture) have all been confirmed live with the exact same `extra_vars` launched against both at once.
+- **Verified working side by side on both amd64 and arm64 Proxmox hosts** — template selection/download, DHCP (with the static-IP self-heal available if it's ever needed), and GPU passthrough (correctly discriminating real hardware per host, not architecture) have all been confirmed live with the exact same `extra_vars` launched against both at once. Docker-in-LXC itself relies on `--features nesting=1` (already set at container-create time) — a well-documented Proxmox pattern, not yet separately re-confirmed live since this playbook's Docker-only refactor.
 
 ---
 
@@ -444,7 +412,7 @@ RHEL-family images (CentOS Stream 9, Rocky 9, AlmaLinux 9) are intentionally not
 - **`expose_to_internet` on Create VM depends on the QEMU guest agent starting up inside the new VM** (it's delivered via `qm guest exec`, not SSH, since the VM may not be tailnet-reachable yet). The job waits up to 5 minutes for the guest agent before giving up — on a very slow-booting VM this could still be tight; if you ever see this specific step fail, it's almost always the guest agent not being ready in time, not a real Funnel/Tailscale problem.
 - **No dynamic inventory today.** Every playbook target (`vm_name`, `ct_name`, `target_host`) is a name the caller must already know — there's no live "list of VMs that currently exist" the UI can query from AWX itself. This is planned as a separate follow-up (likely an AWX Inventory Source using the `community.general.proxmox` plugin), not something covered by anything in this document yet.
 - **AWX Project sync isn't automatic.** An AWX Project backed by git only re-pulls when something triggers it — either "Update Revision on Launch" enabled on the Job Template, or a manual/scheduled Project sync. A code change pushed to GitHub can silently have zero effect on real job runs until one of those happens. Also worth knowing: more than one AWX Project can point at the same or related repos and drift out of sync with each other — confirm which Project a Job Template actually uses, and its current revision hash, before assuming a code fix has taken effect.
-- **Maintainer gotcha: `set_fact` can never override a variable that also arrived as an `extra_var`** (which is exactly what every AWX Survey answer and Job Template "Variables" field becomes). Extra vars have the highest precedence in Ansible — above `set_fact`, above everything — so a task that tries to "correct" or fill in a variable using its own name (e.g. `set_fact: storage: "{{ ... }}"` when `storage` is also a Survey field) is silently ignored the moment that variable is referenced again; the original extra_var value always wins. Confirmed live: this exact mechanism was why the storage/bridge/app-catalog auto-correction logic in Create VM and Create LXC didn't work on the first several attempts, despite the logic itself being correct — the fix was to compute a **distinctly-named** fact (`resolved_storage`, `resolved_bridge`, `resolved_app_install_script`, `resolved_expose_port`, etc.) and use only that name downstream, never reassigning the original Survey variable name. Apply the same pattern to any future "validate and auto-correct" logic added to these playbooks.
+- **Maintainer gotcha: `set_fact` can never override a variable that also arrived as an `extra_var`** (which is exactly what every AWX Survey answer and Job Template "Variables" field becomes). Extra vars have the highest precedence in Ansible — above `set_fact`, above everything — so a task that tries to "correct" or fill in a variable using its own name (e.g. `set_fact: storage: "{{ ... }}"` when `storage` is also a Survey field) is silently ignored the moment that variable is referenced again; the original extra_var value always wins. Confirmed live: this exact mechanism was why the storage/bridge auto-correction logic in Create VM and Create LXC didn't work on the first several attempts, despite the logic itself being correct — the fix was to compute a **distinctly-named** fact (`resolved_storage`, `resolved_bridge`, `resolved_template_storage`, etc.) and use only that name downstream, never reassigning the original Survey variable name. Apply the same pattern to any future "validate and auto-correct" logic added to these playbooks.
 - **A brand-new host needs working SSH + passwordless sudo (or a direct root credential) before AWX can do anything with it at all** — this is a one-time bootstrap prerequisite, not something any playbook can configure remotely (you can't use a broken sudo to fix a broken sudo). Confirmed live: a host whose SSH user lacked `NOPASSWD` sudo failed every job at the very first task ("Gathering Facts") with `"Missing sudo password"`, before any real playbook logic ever ran. Bake this into whatever process onboards a new Proxmox host (e.g. `post_boot.sh`) so it's never a surprise per-host.
 - **Prefer stable Tailscale DNS hostnames over raw IPs in AWX's inventory.** A device's Tailscale IP can change if it re-registers — confirmed live: a host's inventory entry silently went stale after its IP changed, causing SSH timeouts on every job that looked exactly like a playbook bug but wasn't. The `<device-name>.<tailnet-name>.ts.net` hostname stays constant even if the underlying IP changes later.
 - **A small/resource-constrained Proxmox host can hit genuine OOM kills under concurrent load** — confirmed live: the Linux kernel killed a running VM's QEMU process outright (`Out of memory: Killed process ... (kvm)`) on a board with only ~7.4GB RAM while a Docker install and other test containers were running at the same time. This isn't a playbook bug on any architecture, and isn't fixable in the playbook — it's a real hardware capacity limit. On a constrained host, test one heavy workload at a time and check `free -h`/`pct list`/`qm list` for what else is already running before launching another.

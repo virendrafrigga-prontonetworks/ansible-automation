@@ -1,5 +1,5 @@
 ---
-- name: Create an LXC container and deploy an app directly on Proxmox
+- name: Create an LXC container with Docker installed and running on Proxmox
   hosts: all
   gather_facts: true
   become: true
@@ -25,50 +25,6 @@
     memory: 1024                             # From AWX Survey
     cores: 1                                 # From AWX Survey
     ct_disk_gb: 8                            # From AWX Survey - plain GB number (pct's --rootfs unit, unlike qm resize's "8G" style)
-    # Built-in catalog of known apps - a normal user just picks a name here
-    # (e.g. a UI dropdown), never writes a shell command themselves. Add a
-    # new app by adding an entry here (a data-only change, no task logic to
-    # touch) - install_script/post_install_script/default_port fill in
-    # app_install_script/app_post_install_script/expose_port automatically
-    # whenever those are left at their defaults. Anything NOT in this
-    # catalog still works the old way: app_choice is installed as an apt
-    # package name, or app_install_script can be set directly for a fully
-    # custom one-off install - both remain available as the power-user path.
-    lxc_app_catalog:
-      nginx:
-        default_port: 80
-      ollama:
-        install_script: "apt-get install -y zstd && curl -fsSL https://ollama.com/install.sh | sh"
-        # Ollama's server rejects requests whose Host header it doesn't
-        # recognize whenever it's bound to localhost (anti-DNS-rebinding
-        # protection) - confirmed live: Tailscale Funnel proxying correctly
-        # to 127.0.0.1:11434 still got a 403 from Ollama itself because the
-        # Host header was the funnel hostname, not localhost.
-        # OLLAMA_ORIGINS alone does NOT fix this (that's for browser CORS
-        # Origin headers, a different check) - confirmed live it was
-        # applied correctly and still got 403. The actual fix is binding
-        # to 0.0.0.0 instead of localhost, which bypasses this Host check
-        # entirely (this is Ollama's own documented behavior difference,
-        # not a bug in our config). Trade-off worth knowing: this also
-        # means Ollama is directly reachable on port 11434 by anything
-        # that can reach this container's LAN/tailnet IP, not just through
-        # Funnel's TLS-fronted URL - fine given Ollama already has no
-        # built-in auth regardless of exposure method (see expose_to_internet
-        # caveats elsewhere), but worth knowing this widens reachability
-        # slightly beyond "only via the public funnel URL."
-        post_install_script: >-
-          mkdir -p /etc/systemd/system/ollama.service.d &&
-          printf '[Service]\nEnvironment=OLLAMA_HOST=0.0.0.0:11434\nEnvironment=OLLAMA_ORIGINS=*\n' > /etc/systemd/system/ollama.service.d/override.conf &&
-          systemctl daemon-reload && systemctl restart ollama && sleep 2 && ollama pull llama3.2:1b
-        default_port: 11434
-
-    app_choice: "nginx"                      # From AWX Survey - a catalog name above, or any apt package name
-    # Advanced/escape hatch - leave blank to use the catalog entry above (if
-    # app_choice matches one) or a plain apt package install otherwise. Set
-    # this directly only for a fully custom, one-off app not worth adding
-    # to the catalog.
-    app_install_script: ""                   # From AWX Survey
-    app_post_install_script: ""              # From AWX Survey
 
     # Passes the Proxmox host's Mali GPU (/dev/mali0) and DRM render nodes
     # (/dev/dri) into the container, when present - detected automatically,
@@ -105,13 +61,15 @@
     # with a matching tag:lxc-host - adjust if you want a different name.
     tailscale_tag: "tag:lxc-host"
 
-    # Private by default - only expose to the real internet if explicitly asked.
-    expose_to_internet: false                # From AWX Survey
-    # 0 (default) auto-fills from the catalog entry's default_port above
-    # (e.g. Ollama -> 11434), falling back to 80 if app_choice isn't a
-    # catalog entry - a normal user shouldn't have to already know which
-    # port a given app listens on. Set explicitly to override.
-    expose_port: 0                           # From AWX Survey
+    # No expose_to_internet/expose_port here - this playbook creates the
+    # container and gets Docker running on it, but doesn't install or
+    # expose any specific app itself, so there's nothing meaningful to
+    # expose yet. Deploy AND expose apps afterward with
+    # Install_Docker_And_App.yml (its own, richer exposure model - path
+    # routing, multiple apps, tcp_funnel_port), targeting this container
+    # by its ct_name/tailnet hostname with vm_user: "root" - that playbook
+    # is purely SSH + Docker commands, so it works against an LXC
+    # container the same way it already does against a VM.
 
     # Multi-arch support: Proxmox's own "system" template catalog only ever
     # carries x86_64 (amd64) builds, even on an (unofficial) ARM Proxmox
@@ -133,45 +91,6 @@
       debian-12-standard: { distro: debian, codename: bookworm }
 
   tasks:
-    - name: Resolve app_choice against the built-in app catalog
-      ansible.builtin.set_fact:
-        lxc_app_catalog_entry: "{{ lxc_app_catalog[app_choice] | default({}) }}"
-
-    - name: Resolve install method and exposed port from the catalog
-      # IMPORTANT: never set_fact back onto app_install_script/
-      # app_post_install_script/expose_port themselves - extra_vars (which is
-      # exactly what AWX Survey/launch payloads inject) have the HIGHEST
-      # precedence in Ansible, above set_fact, so a task trying to
-      # "correct" a variable that also arrived as an extra_var is silently
-      # ignored and the original extra_var value wins every time it's
-      # referenced again. Confirmed live: this exact mechanism was also why
-      # storage/template_storage/bridge "corrections" below use distinct
-      # resolved_* names rather than reassigning the input names. Compute
-      # genuinely new fact names here and use ONLY those downstream.
-      ansible.builtin.set_fact:
-        resolved_app_install_script: >-
-          {{ app_install_script if app_install_script | length > 0
-             else lxc_app_catalog_entry.install_script | default('') }}
-        resolved_app_post_install_script: >-
-          {{ app_post_install_script if app_post_install_script | length > 0
-             else lxc_app_catalog_entry.post_install_script | default('') }}
-        # Treats an incoming expose_port of exactly 80 the same as blank
-        # when the catalog entry wants a different port - confirmed live:
-        # an AWX Survey default of 80 (left over from before this catalog
-        # existed) arrives as an explicit extra_var, which the plain
-        # "> 0 means set" check below can't tell apart from someone
-        # genuinely choosing 80. 80 was this whole playbook's only default
-        # before the catalog existed, so treating it as "probably just the
-        # old default, not a deliberate choice" is a reasonable trade-off -
-        # the rare case of someone genuinely wanting Ollama on port 80
-        # specifically can still be forced via the Advanced app_install_script
-        # path or by using a port other than 80.
-        resolved_expose_port: >-
-          {{ expose_port if (expose_port | int > 0 and not
-                              (expose_port | int == 80 and lxc_app_catalog_entry.default_port is defined
-                               and lxc_app_catalog_entry.default_port != 80))
-             else lxc_app_catalog_entry.default_port | default(80) }}
-
     - name: Validate rootfs storage against this host, auto-correcting if invalid or unset
       # Runs every time, not just when storage is blank - a stale AWX
       # Survey default, an old saved extra_vars, or a value copied from a
@@ -207,9 +126,10 @@
               Available on this host: {{ rootfs_storages.stdout_lines | join(', ') }}.
 
         - name: Resolve the rootfs storage to use (requested value if valid, otherwise auto-detected)
-          # Named resolved_storage, NOT storage - see the note on the app
-          # catalog task above about why set_fact can never override a
-          # same-named extra_var.
+          # Named resolved_storage, NOT storage - an AWX Survey/extra_vars
+          # value always beats a set_fact of the same name, so a task
+          # trying to "correct" storage itself would be silently ignored
+          # on every later reference. A distinctly-named fact avoids that.
           ansible.builtin.set_fact:
             resolved_storage: >-
               {{ storage if (storage | length > 0 and storage in rootfs_storages.stdout_lines)
@@ -712,33 +632,28 @@
               delay: 5
               changed_when: false
 
-    - name: Install the app inside the container as an apt package
-      # Runs every time, not just for brand-new containers - confirmed
-      # live: a prior run's install could get stuck/interrupted while the
-      # network was down, leaving the container reused-by-name but with
-      # the app never actually finished installing. apt-get install is
-      # itself idempotent (a safe no-op if already correctly installed),
-      # so always attempting it here fixes a broken prior install instead
-      # of silently trusting that a name match means a healthy app.
-      when: resolved_app_install_script | length == 0
+    - name: Check if Docker is already installed inside the container
+      ansible.builtin.command: pct exec {{ ctid }} -- docker --version
+      register: docker_check
+      changed_when: false
+      failed_when: false
+
+    - name: Install Docker inside the container
+      # Runs every time, not just for brand-new containers - same
+      # idempotent-and-self-healing approach as the rest of this playbook:
+      # apt-get install is a safe no-op if Docker is already correctly
+      # installed, so always attempting it here fixes a broken prior
+      # install instead of silently trusting a name match. This is the
+      # only "app" this playbook installs - deploy actual apps afterward
+      # with Install_Docker_And_App.yml (see the docker_apps note near
+      # expose_to_internet above).
+      when: docker_check.rc != 0
       ansible.builtin.command: >-
-        pct exec {{ ctid }} -- bash -c "apt-get update && apt-get install -y curl {{ app_choice }}"
+        pct exec {{ ctid }} -- bash -c "apt-get update && apt-get install -y docker.io docker-compose-v2"
       changed_when: true
 
-    - name: Install the app inside the container via a custom install script
-      # Runs whatever resolved_app_install_script ended up as (catalog
-      # entry or explicit app_install_script override) verbatim - trusted
-      # Survey/operator input, same trust model as tailscale_authkey and
-      # docker_apps.yml's app_command/app_extra_compose elsewhere in this
-      # repo. Also runs every time, same reasoning as the apt-install task above.
-      when: resolved_app_install_script | length > 0
-      ansible.builtin.command: >-
-        pct exec {{ ctid }} -- bash -c "apt-get update && apt-get install -y curl && {{ resolved_app_install_script }}"
-      changed_when: true
-
-    - name: Run the app's post-install command, if provided
-      when: resolved_app_post_install_script | length > 0
-      ansible.builtin.command: pct exec {{ ctid }} -- bash -c "{{ resolved_app_post_install_script }}"
+    - name: Ensure Docker service is running and enabled inside the container
+      ansible.builtin.command: pct exec {{ ctid }} -- systemctl enable --now docker
       changed_when: true
 
     - name: Render the Tailscale join script content (matches post_boot.sh's proven flags)
@@ -785,55 +700,18 @@
       register: lxc_tailnet_reachability
       ignore_errors: true
 
-    - name: Expose this app to the public internet via Tailscale Funnel
-      # Private by default. Only runs when explicitly requested. Approval can
-      # take anywhere from seconds to days, so this doesn't wait or fail on
-      # it here - it hands off to a detached script running inside the
-      # container that polls until approved, then enables Funnel on its own.
-      # Runs on every invocation with expose_to_internet: true, whether the
-      # container is brand new or already existed - so exposing an existing
-      # (e.g. GPU/Ollama) container is just a re-run with this flag set,
-      # no duplicate container created.
-      when: expose_to_internet | bool
-      block:
-        - name: Render the Tailscale Funnel enable script content
-          ansible.builtin.set_fact:
-            funnel_enable_script: "{{ lookup('template', playbook_dir + '/templates/enable-funnel.sh.j2') }}"
-          vars:
-            tailscale_hostname: "{{ ct_name }}"
-            funnel_port: "{{ resolved_expose_port }}"
-
-        - name: Stage the Funnel enable script on the Proxmox host
-          ansible.builtin.copy:
-            content: "{{ funnel_enable_script }}"
-            dest: "/tmp/{{ ct_name }}-enable-funnel.sh"
-            mode: "0700"
-
-        - name: Push the Funnel enable script into the container
-          ansible.builtin.command: >-
-            pct push {{ ctid }} /tmp/{{ ct_name }}-enable-funnel.sh /root/enable-funnel.sh --perms 700
-          changed_when: true
-
-        - name: Remove the staged Funnel enable script from the Proxmox host
-          ansible.builtin.file:
-            path: "/tmp/{{ ct_name }}-enable-funnel.sh"
-            state: absent
-
-        - name: Start the Funnel enable script inside the container as a transient systemd unit
-          ansible.builtin.command: >-
-            pct exec {{ ctid }} -- systemd-run --unit=enable-funnel --collect --no-block /root/enable-funnel.sh
-          changed_when: true
-
     - name: Show access instructions
+      # No expose_to_internet handling here - this playbook only creates
+      # the container and gets Docker running on it. Deploy AND expose
+      # actual apps with Install_Docker_And_App.yml afterward (targeting
+      # this container by ct_name, vm_user: "root") - see that playbook's
+      # own exposure model (path routing, tcp_funnel_port, etc.).
       ansible.builtin.debug:
         msg: >-
-          LXC container '{{ ct_name }}' (CTID {{ ctid }}) is running {{ app_choice }} directly on the Proxmox host.
+          LXC container '{{ ct_name }}' (CTID {{ ctid }}) is created with Docker installed and running.
           {{ 'It is already reachable over Tailscale SSH as ' ~ ct_name ~ '.'
              if lxc_tailnet_reachability is succeeded
              else 'Not yet confirmed reachable over the tailnet - most likely still pending manual approval in '
-                  ~ 'your Tailscale admin console. Approve it there; no need to re-run this job once approved.' }}
-          {{ ('A background script inside the container is waiting for tailnet admin approval, then will expose it '
-              ~ 'at https://' ~ ct_name ~ '.<your-tailnet>.ts.net - check /var/log/tailscale-funnel.log in the container for status.')
-             if (expose_to_internet | bool)
-             else ('Private - reachable only over the tailnet at ' ~ ct_name ~ ' (or its tailnet IP).'
-                   ~ ' Re-run this job with expose_to_internet=true if you want it public.') }}
+                  ~ 'your Tailscale admin console. Approve it there before deploying anything onto it.' }}
+          Deploy and expose apps onto it with Install_Docker_And_App.yml, using target_host="{{ ct_name }}"
+          and vm_user="root".
