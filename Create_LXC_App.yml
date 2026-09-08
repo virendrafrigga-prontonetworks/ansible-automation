@@ -70,23 +70,6 @@
     app_install_script: ""                   # From AWX Survey
     app_post_install_script: ""              # From AWX Survey
 
-    # Leave empty (default) to install app_choice natively, as above - the
-    # container's only job. Set this instead when you want Docker running
-    # apps inside the container - same schema as Install_Docker_And_App.yml
-    # (see vars/docker_apps.yml for the full field list and catalog
-    # presets), reusing that exact same proven deployment logic
-    # (deploy_docker_apps_block.yml). This is what makes adding a genuinely
-    # new app a zero-code-change operation even when it's not a plain apt
-    # package: anything with a published Docker image (which is nearly
-    # everything - Ollama, LocalAI, Postgres, whatever comes next) just
-    # needs an image name here, the same way Install_Docker_And_App.yml
-    # already worked for VMs. When this is non-empty, app_choice/
-    # app_install_script/app_post_install_script above are skipped
-    # entirely - the container becomes a Docker host instead of running a
-    # single native app.
-    docker_apps: []                          # From AWX Survey
-    wordpress_db_password: ""                # From AWX Survey/Vault - required when wordpress is in docker_apps
-
     # Passes the Proxmox host's Mali GPU (/dev/mali0) and DRM render nodes
     # (/dev/dri) into the container, when present - detected automatically,
     # skipped harmlessly (with a warning) on a host that has neither. Only
@@ -737,7 +720,7 @@
       # itself idempotent (a safe no-op if already correctly installed),
       # so always attempting it here fixes a broken prior install instead
       # of silently trusting that a name match means a healthy app.
-      when: docker_apps | length == 0 and resolved_app_install_script | length == 0
+      when: resolved_app_install_script | length == 0
       ansible.builtin.command: >-
         pct exec {{ ctid }} -- bash -c "apt-get update && apt-get install -y curl {{ app_choice }}"
       changed_when: true
@@ -748,14 +731,13 @@
       # Survey/operator input, same trust model as tailscale_authkey and
       # docker_apps.yml's app_command/app_extra_compose elsewhere in this
       # repo. Also runs every time, same reasoning as the apt-install task above.
-      # Skipped entirely when docker_apps is set - see that var's comment.
-      when: docker_apps | length == 0 and resolved_app_install_script | length > 0
+      when: resolved_app_install_script | length > 0
       ansible.builtin.command: >-
         pct exec {{ ctid }} -- bash -c "apt-get update && apt-get install -y curl && {{ resolved_app_install_script }}"
       changed_when: true
 
     - name: Run the app's post-install command, if provided
-      when: docker_apps | length == 0 and resolved_app_post_install_script | length > 0
+      when: resolved_app_post_install_script | length > 0
       ansible.builtin.command: pct exec {{ ctid }} -- bash -c "{{ resolved_app_post_install_script }}"
       changed_when: true
 
@@ -811,11 +793,8 @@
       # Runs on every invocation with expose_to_internet: true, whether the
       # container is brand new or already existed - so exposing an existing
       # (e.g. GPU/Ollama) container is just a re-run with this flag set,
-      # no duplicate container created. Skipped when docker_apps is set -
-      # the Docker-deploy play (below) handles its own exposure instead,
-      # since it covers potentially several apps behind one Traefik/Funnel
-      # endpoint rather than a single native app_choice.
-      when: expose_to_internet | bool and docker_apps | length == 0
+      # no duplicate container created.
+      when: expose_to_internet | bool
       block:
         - name: Render the Tailscale Funnel enable script content
           ansible.builtin.set_fact:
@@ -846,10 +825,6 @@
           changed_when: true
 
     - name: Show access instructions
-      # Skipped when docker_apps is set - the Docker-deploy play (below)
-      # shows its own access instructions instead, covering every deployed
-      # app rather than a single native app_choice.
-      when: docker_apps | length == 0
       ansible.builtin.debug:
         msg: >-
           LXC container '{{ ct_name }}' (CTID {{ ctid }}) is running {{ app_choice }} directly on the Proxmox host.
@@ -862,50 +837,3 @@
              if (expose_to_internet | bool)
              else ('Private - reachable only over the tailnet at ' ~ ct_name ~ ' (or its tailnet IP).'
                    ~ ' Re-run this job with expose_to_internet=true if you want it public.') }}
-
-- name: Register the newly-created LXC container for Docker app deployment, if requested
-  hosts: localhost
-  gather_facts: false
-  tasks:
-    - name: Add the LXC container to in-memory inventory
-      # docker_apps is a Survey var scoped to the first play above - it
-      # doesn't automatically carry into this later play (different
-      # target host), so default() here rather than assume it's set.
-      ansible.builtin.add_host:
-        name: "{{ ct_name }}"
-        ansible_user: root
-        groups: lxc_docker_target
-      when: docker_apps | default([]) | length > 0
-
-- name: Install Docker inside the LXC container and deploy the requested apps
-  # Only reached if the task above actually added a host to this group -
-  # if docker_apps was left empty (the default), this play has zero
-  # matching hosts and is skipped entirely, same pattern
-  # Install_Docker_And_App.yml already uses for its own add_host/hosts split.
-  hosts: lxc_docker_target
-  become: true
-  gather_facts: true
-
-  vars_files:
-    - vars/docker_apps.yml
-
-  tasks:
-    - name: Wait for the container to be reachable over SSH before deploying Docker apps
-      # Requires the container to actually be Tailscale-approved already,
-      # unlike the native app_choice path (which uses pct exec from the
-      # Proxmox host and never needs tailnet connectivity at all). If
-      # approval is still pending, this fails clearly rather than hanging -
-      # approve the device, then just re-run this job once it's confirmed
-      # reachable.
-      ansible.builtin.wait_for_connection:
-        timeout: 120
-        delay: 5
-
-    - name: Install Docker, deploy the requested apps, and expose them
-      ansible.builtin.include_tasks: deploy_docker_apps_block.yml
-      vars:
-        target_host: "{{ ct_name }}"
-        docker_apps: "{{ docker_apps | default([]) }}"
-        expose_to_internet: "{{ expose_to_internet | default(false) }}"
-        expose_port: "{{ expose_port | default(0) }}"
-        wordpress_db_password: "{{ wordpress_db_password | default('') }}"
