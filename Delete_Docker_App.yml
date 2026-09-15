@@ -3,7 +3,7 @@
   hosts: localhost
   gather_facts: false
   vars:
-    target_host: "edgecompute-lxc01"  # HARDCODED for UI testing - matches Install_Docker_And_App.yml's test target_host
+    target_host: "edgecompute-lxc02"  # HARDCODED for UI testing - matches Install_Docker_And_App.yml's test target_host
     vm_user: "root"                   # HARDCODED for UI testing - "root" because target_host above is an LXC container
   tasks:
     - name: Force target_host/vm_user for this UI-testing round, ignoring whatever the caller supplies
@@ -11,7 +11,7 @@
       # payload) always outrank this file's own vars: block - see the
       # matching note in Install_Docker_And_App.yml.
       ansible.builtin.set_fact:
-        resolved_target_host: "edgecompute-lxc01"
+        resolved_target_host: "edgecompute-lxc02"
         resolved_vm_user: "root"
 
     - name: Add target VM to in-memory inventory

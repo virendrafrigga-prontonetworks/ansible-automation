@@ -30,7 +30,7 @@
     # where vmbr0 isn't the right one.
     bridge: "vmbr0"                        # HARDCODED for UI testing - frontend can't pass extra_vars yet
     os_template: "ubuntu-24.04-standard"    # From AWX Survey - Proxmox LXC template name (no version/arch suffix)
-    ct_name: "edgecompute-lxc01"             # HARDCODED for UI testing - "edgecompute-" prefix identifies resources created by the EdgeCompute UI
+    ct_name: "edgecompute-lxc02"             # HARDCODED for UI testing - "edgecompute-" prefix identifies resources created by the EdgeCompute UI
     memory: 1024                             # From AWX Survey
     cores: 1                                 # From AWX Survey
     ct_disk_gb: 8                            # From AWX Survey - plain GB number (pct's --rootfs unit, unlike qm resize's "8G" style)
@@ -116,7 +116,7 @@
       # pattern as resolved_storage/resolved_bridge below) is the one way
       # around it.
       ansible.builtin.set_fact:
-        resolved_ct_name: "edgecompute-lxc01"
+        resolved_ct_name: "edgecompute-lxc02"
 
     - name: Validate rootfs storage against this host, auto-correcting if invalid or unset
       # Runs every time, not just when storage is blank - a stale AWX

@@ -3,7 +3,7 @@
   hosts: localhost
   gather_facts: false
   vars:
-    target_host: "edgecompute-lxc01"  # HARDCODED for UI testing - targets the LXC from Create_LXC_App.yml's test run
+    target_host: "edgecompute-lxc02"  # HARDCODED for UI testing - targets the LXC from Create_LXC_App.yml's test run
     vm_user: "root"                   # HARDCODED for UI testing - "root" because target_host above is an LXC container, not a VM
   tasks:
     - name: Force target_host/vm_user for this UI-testing round, ignoring whatever the caller supplies
@@ -17,7 +17,7 @@
       # extra_var. Computing distinctly-named facts and using ONLY those
       # names downstream is the one way around it.
       ansible.builtin.set_fact:
-        resolved_target_host: "edgecompute-lxc01"
+        resolved_target_host: "edgecompute-lxc02"
         resolved_vm_user: "root"
 
     - name: Add target VM to in-memory inventory
@@ -77,12 +77,23 @@
         port: 80
         path_prefix: "/"
     wordpress_db_password: ""                  # From AWX Survey/Vault - required when wordpress is in docker_apps
-    # Private by default - only expose to the real internet if explicitly asked.
-    # Covers every HTTP app above at once, via the one shared Traefik/Funnel URL.
-    expose_to_internet: false                  # From AWX Survey
+    # HARDCODED true for this UI-testing round - want the deployed app
+    # publicly reachable right away, no separate step needed. Covers every
+    # HTTP app above at once, via the one shared Traefik/Funnel URL.
+    expose_to_internet: true                   # From AWX Survey
     expose_port: 80                            # From AWX Survey - Traefik's own port
 
   tasks:
+    - name: Force exposure settings for this UI-testing round, ignoring whatever the caller supplies
+      # extra_vars (AWX Job Template "Extra Variables", or a launch-time
+      # payload) always outrank this file's own vars: block - see the
+      # matching resolved_vm_name/resolved_ct_name note in
+      # Create_VM_From_MultiVM_Template.yml/Create_LXC_App.yml. Applied here
+      # pre-emptively in case the frontend's payload ever includes these too.
+      ansible.builtin.set_fact:
+        resolved_expose_to_internet: true
+        resolved_expose_port: 80
+
     - name: Check if Docker is already installed
       ansible.builtin.command: docker --version
       register: docker_check
@@ -181,14 +192,14 @@
       # it here - it hands off to a detached script running inside the VM
       # that polls until approved, then enables Funnel on its own. One Funnel
       # endpoint covers every HTTP app deployed above, path-routed by Traefik.
-      when: expose_to_internet | bool
+      when: resolved_expose_to_internet | bool
       block:
         - name: Render the Tailscale Funnel enable script content
           ansible.builtin.set_fact:
             funnel_enable_script: "{{ lookup('template', playbook_dir + '/templates/enable-funnel.sh.j2') }}"
           vars:
             tailscale_hostname: "{{ inventory_hostname }}"
-            funnel_port: "{{ expose_port }}"
+            funnel_port: "{{ resolved_expose_port }}"
 
         - name: Push the Funnel enable script to the VM
           ansible.builtin.copy:
@@ -209,6 +220,6 @@
           {% for a in docker_apps %}{% set catalog_entry = docker_app_catalog[a.name] | default({}) %}{% set is_http = a.expose_http | default(catalog_entry.expose_http | default(true)) %}{{ a.name }}{{ (' via TCP Funnel on port ' ~ a.tcp_funnel_port ~ ' (reachable outside the tailnet)') if a.tcp_funnel_port is defined else (' at path ' ~ (a.path_prefix | default('/')) if is_http else ' (internal-only, no path/Funnel access)') }}{{ ', ' if not loop.last else '' }}{% endfor %}.
           {{ ('A background script on ' ~ inventory_hostname ~ ' is waiting for tailnet admin approval, then will expose it '
               ~ 'at https://' ~ inventory_hostname ~ '.<your-tailnet>.ts.net - check /var/log/tailscale-funnel.log there for status.')
-             if (expose_to_internet | bool)
+             if (resolved_expose_to_internet | bool)
              else ('Private - reachable only over the tailnet at ' ~ inventory_hostname ~ ' (or its tailnet IP).'
                    ~ ' Re-run this job with expose_to_internet=true if you want it public.') }}

@@ -9,7 +9,7 @@
     # this host, since AWX's credential/inventory was passing "admin" (its
     # own login user), which the ACL rejects - see Create_LXC_App.yml.
     ansible_user: root
-    ct_name: "edgecompute-lxc01"  # HARDCODED for UI testing - matches Create_LXC_App.yml's test ct_name
+    ct_name: "edgecompute-lxc02"  # HARDCODED for UI testing - matches Create_LXC_App.yml's test ct_name
 
   tasks:
     - name: Force the container name for this UI-testing round, ignoring any ct_name the caller supplies
@@ -19,7 +19,7 @@
       # always outrank this file's own vars: block, so reassigning ct_name
       # itself would be silently ignored.
       ansible.builtin.set_fact:
-        resolved_ct_name: "edgecompute-lxc01"
+        resolved_ct_name: "edgecompute-lxc02"
 
     - name: Look up the container's ID by name
       ansible.builtin.shell: |

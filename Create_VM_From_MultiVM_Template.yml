@@ -48,7 +48,7 @@
       aarch64: arm64
     target_arch: "{{ vm_arch_map[ansible_architecture] | default(ansible_architecture) }}"
 
-    vm_name: "edgecompute-vm01"             # HARDCODED for UI testing - "edgecompute-" prefix identifies resources created by the EdgeCompute UI
+    vm_name: "edgecompute-vm02"             # HARDCODED for UI testing - "edgecompute-" prefix identifies resources created by the EdgeCompute UI
     vm_user: "pronto"                      # From AWX Survey - standard automation user, matches post_boot.sh's baremetal convention
     memory: 2048                            # From AWX Survey
     cores: 2                                # From AWX Survey
@@ -64,26 +64,30 @@
     tailscale_tag: "tag:vm-provisioned"
     vm_ssh_public_key: "{{ lookup('file', playbook_dir + '/id_rsa.pub') }}"
 
-    # Private by default - only expose to the real internet if explicitly
-    # asked. Handled here (not left to a separate Expose_App_To_Internet.yml
-    # run) so a single job creates a publicly-reachable VM in one shot.
-    expose_to_internet: false                # From AWX Survey
+    # HARDCODED true for this UI-testing round - want every VM the
+    # EdgeCompute UI creates to come up publicly reachable right away, no
+    # separate step needed. See resolved_expose_to_internet below for why
+    # this raw name can't be trusted to actually reach the tasks unchanged.
+    expose_to_internet: true                 # From AWX Survey
     expose_port: 80                          # From AWX Survey
 
   tasks:
-    - name: Force the VM name for this UI-testing round, ignoring any vm_name the caller supplies
+    - name: Force the VM name and exposure settings for this UI-testing round, ignoring whatever the caller supplies
       # extra_vars (AWX Job Template "Extra Variables", or a launch-time
       # payload) always outrank this file's own vars: block, so a bad
       # vm_name arriving that way (confirmed live: the EdgeCompute frontend
       # was stamping vm_name/ct_name/target_host with a generic
       # "<inventory name> / <host IP>" label on every launch) can't be
       # fixed by reassigning vm_name itself - set_fact can never override a
-      # variable that also arrived as an extra_var. Computing a
-      # distinctly-named fact and using ONLY that name downstream (same
+      # variable that also arrived as an extra_var. Computing
+      # distinctly-named facts and using ONLY those names downstream (same
       # pattern as resolved_storage/resolved_bridge below) is the one way
-      # around it.
+      # around it. expose_to_internet/expose_port get the same treatment
+      # pre-emptively, in case the frontend's payload ever includes them too.
       ansible.builtin.set_fact:
-        resolved_vm_name: "edgecompute-vm01"
+        resolved_vm_name: "edgecompute-vm02"
+        resolved_expose_to_internet: true
+        resolved_expose_port: 80
 
     - name: Validate VM disk storage against this host, auto-correcting if invalid or unset
       # Runs every time, not just when storage is blank - a stale AWX
@@ -304,14 +308,14 @@
       # tailnet-reachable yet (that's exactly the approval wait above) - the
       # QEMU guest agent works over the hypervisor channel regardless of
       # tailnet/network state, so it doesn't need to wait for either.
-      when: expose_to_internet | bool
+      when: resolved_expose_to_internet | bool
       block:
         - name: Render the Tailscale Funnel enable script content
           ansible.builtin.set_fact:
             funnel_enable_script: "{{ lookup('template', playbook_dir + '/templates/enable-funnel.sh.j2') }}"
           vars:
             tailscale_hostname: "{{ resolved_vm_name }}"
-            funnel_port: "{{ expose_port }}"
+            funnel_port: "{{ resolved_expose_port }}"
 
         - name: Wait for the QEMU guest agent to be ready inside the VM
           ansible.builtin.command: qm guest cmd {{ new_vmid }} ping
@@ -346,6 +350,6 @@
                   ~ 'no need to re-run this job once approved, just proceed to Install Docker/LXC whenever ready.' }}
           {{ ('A background script on ' ~ resolved_vm_name ~ ' is waiting for tailnet admin approval, then will expose it '
               ~ 'at https://' ~ resolved_vm_name ~ '.<your-tailnet>.ts.net - check /var/log/tailscale-funnel.log there for status.')
-             if (expose_to_internet | bool)
+             if (resolved_expose_to_internet | bool)
              else ('Private - reachable only over the tailnet at ' ~ resolved_vm_name ~ ' (or its tailnet IP).'
                    ~ ' Re-run this job with expose_to_internet=true if you want it public.') }}
