@@ -102,7 +102,7 @@
         # Reusable + Tagged key before running, then rotate it once this
         # hardcoded-value test round is done, since it will be sitting in
         # git history from here on.
-        resolved_tailscale_authkey: "PASTE_YOUR_TAILSCALE_AUTHKEY_HERE"
+        resolved_tailscale_authkey: "tskey-auth-kvUSq5Jgke11CNTRL-FfzoToUgmufVsuzASdJfvfsjMSR1TaN9C"
 
     - name: Validate VM disk storage against this host, auto-correcting if invalid or unset
       # Runs every time, not just when storage is blank - a stale AWX
