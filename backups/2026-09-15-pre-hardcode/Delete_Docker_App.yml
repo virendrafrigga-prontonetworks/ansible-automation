@@ -1,0 +1,31 @@
+---
+- name: Register the target VM for this run
+  hosts: localhost
+  gather_facts: false
+  vars:
+    target_host: "dev-vm01"          # From AWX Survey - the VM's tailnet hostname
+    vm_user: "pronto"                 # From AWX Survey - must match the vm_user used to provision this VM
+  tasks:
+    - name: Add target VM to in-memory inventory
+      ansible.builtin.add_host:
+        name: "{{ target_host }}"
+        ansible_user: "{{ vm_user }}"
+        groups: docker_target
+
+- name: Delete Docker apps from this VM, leaving Traefik untouched
+  hosts: docker_target
+  become: true
+  gather_facts: false
+
+  vars:
+    # From AWX Survey - the docker_apps entry name(s) to remove (their
+    # /opt/<name> directories). A single name still works the same way.
+    app_names:
+      - "nginx"
+
+  tasks:
+    - name: Delete each requested app
+      ansible.builtin.include_tasks: delete_docker_app_block.yml
+      loop: "{{ app_names }}"
+      loop_control:
+        loop_var: current_app_name

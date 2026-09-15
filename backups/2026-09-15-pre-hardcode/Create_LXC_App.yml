@@ -1,0 +1,717 @@
+---
+- name: Create an LXC container with Docker installed and running on Proxmox
+  hosts: all
+  gather_facts: true
+  become: true
+
+  vars:
+    local_cache_dir: "{{ playbook_dir }}/.image_cache"
+    # Leave blank (default) to auto-detect from this host - picks the first
+    # active storage that actually supports the content type needed.
+    # Confirmed live: hardcoding "local-lvm" broke outright on a host that
+    # only has "local" - not every Proxmox host has the same storage
+    # layout, and the caller shouldn't have to already know this host's
+    # specific setup just to launch a container. Only set these explicitly
+    # if a host has multiple valid options and you need a non-default one.
+    storage: ""                           # From AWX Survey - block storage for the container's rootfs
+    template_storage: ""                  # From AWX Survey - storage for the LXC template file (vztmpl content)
+    # Leave blank (default) to auto-detect - picks vmbr0 if present (the
+    # standard Proxmox default), otherwise the first bridge interface found
+    # on the host. Only set this explicitly on a host with multiple bridges
+    # where vmbr0 isn't the right one.
+    bridge: ""                             # From AWX Survey
+    os_template: "ubuntu-24.04-standard"    # From AWX Survey - Proxmox LXC template name (no version/arch suffix)
+    ct_name: "app-lxc01"                    # From AWX Survey
+    memory: 1024                             # From AWX Survey
+    cores: 1                                 # From AWX Survey
+    ct_disk_gb: 8                            # From AWX Survey - plain GB number (pct's --rootfs unit, unlike qm resize's "8G" style)
+
+    # Passes the Proxmox host's Mali GPU (/dev/mali0) and DRM render nodes
+    # (/dev/dri) into the container, when present - detected automatically,
+    # skipped harmlessly (with a warning) on a host that has neither. Only
+    # covers Mali/DRM devices as found on ARM/CIX hosts like this Orange Pi -
+    # NVIDIA/AMD GPU passthrough would need separate, not-yet-implemented
+    # device paths. Getting the device node into the container is necessary
+    # but not sufficient for GPU-accelerated inference - that also needs a
+    # matching Mali userspace Vulkan driver installed inside the container,
+    # a separate, harder, vendor-driver-dependent problem this doesn't solve.
+    gpu_passthrough: false                   # From AWX Survey
+    # Unprivileged LXC containers often don't reliably pick up DNS via DHCP the
+    # way VMs do - set it explicitly rather than depending on that. Public
+    # resolver on purpose: the container hasn't joined the tailnet yet at this
+    # point, so a tailnet-only resolver (e.g. 100.100.100.100) wouldn't be
+    # reachable from it regardless.
+    ct_nameserver: "1.1.1.1"                 # From AWX Survey
+
+    # Leave both blank (default, recommended for everyone) - the container
+    # tries DHCP first, and if that genuinely fails, the playbook itself
+    # auto-detects this host's subnet/gateway and picks a free-looking
+    # static IP with no input needed. No one should have to already know
+    # this network's IPs just to launch a container. These two remain
+    # available only as an explicit override for a specific known-good
+    # address - an admin/ops concern, not normal usage. ct_ip is CIDR
+    # format, e.g. "192.168.1.50/24"; ct_gateway is that subnet's gateway IP.
+    ct_ip: ""                                # From AWX Survey
+    ct_gateway: ""                           # From AWX Survey - required together with ct_ip
+
+    # From AWX Credential/Vault - a Reusable + Tagged Tailscale auth key
+    # (not Ephemeral), same one used by Playbook 1. Never hardcode a real key here.
+    tailscale_authkey: ""
+    # Extending your team's tag scheme (tag:vm-provisioned / tag:docker-host)
+    # with a matching tag:lxc-host - adjust if you want a different name.
+    tailscale_tag: "tag:lxc-host"
+
+    # No expose_to_internet/expose_port here - this playbook creates the
+    # container and gets Docker running on it, but doesn't install or
+    # expose any specific app itself, so there's nothing meaningful to
+    # expose yet. Deploy AND expose apps afterward with
+    # Install_Docker_And_App.yml (its own, richer exposure model - path
+    # routing, multiple apps, tcp_funnel_port), targeting this container
+    # by its ct_name/tailnet hostname with vm_user: "root" - that playbook
+    # is purely SSH + Docker commands, so it works against an LXC
+    # container the same way it already does against a VM.
+
+    # Multi-arch support: Proxmox's own "system" template catalog only ever
+    # carries x86_64 (amd64) builds, even on an (unofficial) ARM Proxmox
+    # port - confirmed live (an amd64 template on an aarch64 host fails with
+    # "Exec format error", the kernel simply can't execute it). Maps
+    # ansible_architecture to the naming convention both Proxmox's own
+    # catalog and images.linuxcontainers.org use in filenames/paths.
+    lxc_arch_map:
+      x86_64: amd64
+      aarch64: arm64
+    target_arch: "{{ lxc_arch_map[ansible_architecture] | default(ansible_architecture) }}"
+    # images.linuxcontainers.org fallback (used only when Proxmox's own
+    # catalog has no template for this host's architecture) needs a
+    # distro/codename pair, not a version number - extend this if you add
+    # more os_template values.
+    lxc_release_map:
+      ubuntu-24.04-standard: { distro: ubuntu, codename: noble }
+      ubuntu-22.04-standard: { distro: ubuntu, codename: jammy }
+      debian-12-standard: { distro: debian, codename: bookworm }
+
+  tasks:
+    - name: Validate rootfs storage against this host, auto-correcting if invalid or unset
+      # Runs every time, not just when storage is blank - a stale AWX
+      # Survey default, an old saved extra_vars, or a value copied from a
+      # different host are all just as invalid as leaving it blank.
+      # Confirmed live: "local-lvm" kept getting passed in from an AWX-side
+      # default left over from before this host's layout was known, and a
+      # blank-only check silently trusted it instead of catching the
+      # mismatch. Always ask the host what's actually there and correct to
+      # a real answer rather than trusting the input blindly.
+      block:
+        - name: List active storages on this host that support LXC rootfs
+          ansible.builtin.shell: |
+            set -o pipefail
+            pvesm status --content rootdir --enabled 1 | awk 'NR>1 {print $1}'
+          args:
+            executable: /bin/bash
+          register: rootfs_storages
+          changed_when: false
+
+        - name: Fail clearly if no rootfs-capable storage was found
+          ansible.builtin.fail:
+            msg: >-
+              No active storage on this Proxmox host supports LXC rootfs (content type
+              'rootdir') - check 'pvesm status' on the host.
+          when: rootfs_storages.stdout_lines | length == 0
+
+        - name: Warn when the requested rootfs storage isn't valid on this host
+          when: storage | length > 0 and storage not in rootfs_storages.stdout_lines
+          ansible.builtin.debug:
+            msg: >-
+              storage='{{ storage }}' isn't a valid LXC-rootfs storage on this host (or wasn't
+              set) - auto-correcting to '{{ rootfs_storages.stdout_lines | first }}'.
+              Available on this host: {{ rootfs_storages.stdout_lines | join(', ') }}.
+
+        - name: Resolve the rootfs storage to use (requested value if valid, otherwise auto-detected)
+          # Named resolved_storage, NOT storage - an AWX Survey/extra_vars
+          # value always beats a set_fact of the same name, so a task
+          # trying to "correct" storage itself would be silently ignored
+          # on every later reference. A distinctly-named fact avoids that.
+          ansible.builtin.set_fact:
+            resolved_storage: >-
+              {{ storage if (storage | length > 0 and storage in rootfs_storages.stdout_lines)
+                 else rootfs_storages.stdout_lines | first }}
+
+    - name: Validate template storage against this host, auto-correcting if invalid or unset
+      block:
+        - name: List active storages on this host that support LXC templates
+          ansible.builtin.shell: |
+            set -o pipefail
+            pvesm status --content vztmpl --enabled 1 | awk 'NR>1 {print $1}'
+          args:
+            executable: /bin/bash
+          register: vztmpl_storages
+          changed_when: false
+
+        - name: Fail clearly if no template-capable storage was found
+          ansible.builtin.fail:
+            msg: >-
+              No active storage on this Proxmox host supports LXC templates (content type
+              'vztmpl') - check 'pvesm status' on the host.
+          when: vztmpl_storages.stdout_lines | length == 0
+
+        - name: Warn when the requested template storage isn't valid on this host
+          when: template_storage | length > 0 and template_storage not in vztmpl_storages.stdout_lines
+          ansible.builtin.debug:
+            msg: >-
+              template_storage='{{ template_storage }}' isn't a valid vztmpl storage on this host (or
+              wasn't set) - auto-correcting to '{{ vztmpl_storages.stdout_lines | first }}'.
+              Available on this host: {{ vztmpl_storages.stdout_lines | join(', ') }}.
+
+        - name: Resolve the template storage to use (requested value if valid, otherwise auto-detected)
+          ansible.builtin.set_fact:
+            resolved_template_storage: >-
+              {{ template_storage if (template_storage | length > 0 and template_storage in vztmpl_storages.stdout_lines)
+                 else vztmpl_storages.stdout_lines | first }}
+
+    - name: Validate network bridge against this host, auto-correcting if invalid or unset
+      block:
+        - name: List bridge interfaces on this host
+          ansible.builtin.shell: |
+            set -o pipefail
+            ip -o link show type bridge | awk -F': ' '{print $2}'
+          args:
+            executable: /bin/bash
+          register: host_bridges
+          changed_when: false
+
+        - name: Fail clearly if no bridge interface was found
+          ansible.builtin.fail:
+            msg: >-
+              No bridge interface found on this Proxmox host - check 'ip link show type bridge' on the host.
+          when: host_bridges.stdout_lines | length == 0
+
+        - name: Warn when the requested bridge isn't valid on this host
+          when: bridge | length > 0 and bridge not in host_bridges.stdout_lines
+          ansible.builtin.debug:
+            msg: >-
+              bridge='{{ bridge }}' doesn't exist on this host (or wasn't set) - auto-correcting to
+              '{{ 'vmbr0' if 'vmbr0' in host_bridges.stdout_lines else host_bridges.stdout_lines | first }}'.
+              Available on this host: {{ host_bridges.stdout_lines | join(', ') }}.
+
+        - name: Resolve the bridge to use (requested value if valid, otherwise auto-detected, prefers vmbr0)
+          ansible.builtin.set_fact:
+            resolved_bridge: >-
+              {{ bridge if (bridge | length > 0 and bridge in host_bridges.stdout_lines)
+                 else ('vmbr0' if 'vmbr0' in host_bridges.stdout_lines else host_bridges.stdout_lines | first) }}
+
+    - name: Fail clearly if ct_ip is set without ct_gateway (or vice versa)
+      ansible.builtin.fail:
+        msg: >-
+          ct_ip and ct_gateway must be set together for a static IP
+          (ct_ip='{{ ct_ip }}', ct_gateway='{{ ct_gateway }}') - or leave both blank to use DHCP.
+      when: (ct_ip | length > 0) != (ct_gateway | length > 0)
+
+    - name: Check whether an LXC container with this name already exists
+      ansible.builtin.shell: |
+        set -o pipefail
+        pct list | awk -v name="{{ ct_name }}" '$3==name {print $1}'
+      args:
+        executable: /bin/bash
+      register: existing_ct
+      changed_when: false
+
+    - name: Record existing container ID, if found
+      ansible.builtin.set_fact:
+        ctid: "{{ existing_ct.stdout | trim }}"
+      when: existing_ct.stdout | trim | length > 0
+
+    - name: Create and configure the LXC container if one with this name doesn't already exist
+      # Re-running this playbook with the same ct_name reuses the existing
+      # container (just re-checks reachability/exposure below) instead of
+      # creating a duplicate - important on memory-constrained hosts where a
+      # second large container (e.g. another GPU/Ollama one) could push the
+      # board into OOM territory rather than just updating what's already there.
+      when: existing_ct.stdout | trim | length == 0
+      block:
+        - name: List LXC templates already present on this storage
+          ansible.builtin.command: pveam list {{ resolved_template_storage }}
+          register: pveam_list
+          changed_when: false
+
+        - name: Check whether a matching-architecture template is already staged
+          # A plain substring check on os_template alone isn't enough - it would
+          # count a wrong-architecture leftover (e.g. an amd64 file from an
+          # earlier attempt on an ARM host) as "already staged" and skip fetching
+          # the correct one. Confirmed live: this exact bug caused every LXC
+          # container on an ARM host to silently keep reusing a stale amd64
+          # rootfs no matter how many times the fallback download logic below
+          # was fixed, because this check never even let it run.
+          ansible.builtin.set_fact:
+            template_already_staged: >-
+              {{ (pveam_list.stdout_lines | select('search', os_template) | select('search', target_arch) | list | length) > 0 }}
+
+        - name: Stage and push the LXC template if missing
+          when: not template_already_staged
+          block:
+            - name: Look up template filenames from the Proxmox appliance catalog
+              ansible.builtin.command: pveam available --section system
+              register: pveam_available
+              changed_when: false
+
+            # Best-effort parse of `pveam available` output ("system  <filename>" columns) -
+            # verify this still matches the column format on your Proxmox version.
+            # Requires the filename to ALSO match this host's architecture -
+            # Proxmox's own catalog is x86_64-only in practice, so this list is
+            # empty on an ARM host, triggering the linuxcontainers.org fallback
+            # below rather than silently grabbing a wrong-architecture template.
+            - name: Check whether the Proxmox catalog has a matching-architecture template
+              ansible.builtin.set_fact:
+                proxmox_catalog_match: >-
+                  {{ pveam_available.stdout_lines | select('search', os_template) | select('search', target_arch) | list }}
+
+            - name: Use the Proxmox catalog's template when a matching-architecture one exists
+              when: proxmox_catalog_match | length > 0
+              ansible.builtin.set_fact:
+                lxc_template_filename: "{{ (proxmox_catalog_match | first).split() | last }}"
+                lxc_template_download_url: "http://download.proxmox.com/images/system/{{ (proxmox_catalog_match | first).split() | last }}"
+
+            - name: Fall back to images.linuxcontainers.org when no matching-architecture template exists in Proxmox's catalog
+              when: proxmox_catalog_match | length == 0
+              block:
+                - name: Look up the distro/codename for this os_template
+                  ansible.builtin.set_fact:
+                    lxc_release_info: "{{ lxc_release_map[os_template] | default({}) }}"
+
+                - name: Fail clearly if this os_template has no known linuxcontainers.org mapping
+                  ansible.builtin.fail:
+                    msg: >-
+                      No Proxmox-catalog template exists for architecture '{{ target_arch }}', and '{{ os_template }}'
+                      has no images.linuxcontainers.org mapping in lxc_release_map to fall back to. Add one, or use
+                      an os_template this host's architecture actually has a template for.
+                  when: lxc_release_info == {}
+
+                - name: List available build dates for this distro/release/architecture
+                  ansible.builtin.uri:
+                    url: >-
+                      https://images.linuxcontainers.org/images/{{ lxc_release_info.distro }}/{{ lxc_release_info.codename }}/{{ target_arch }}/default/
+                    return_content: true
+                  register: lxc_images_index
+                  delegate_to: localhost
+                  become: false
+
+                - name: Extract the most recent build date directory
+                  # No stable "latest" alias exists on this server - the date
+                  # format (YYYYMMDD_HH:MM) sorts correctly as a plain string.
+                  ansible.builtin.set_fact:
+                    lxc_latest_build: "{{ (lxc_images_index.content | regex_findall('\\d{8}_\\d{2}:\\d{2}')) | sort | last }}"
+
+                - name: Set filename and source URL from images.linuxcontainers.org
+                  ansible.builtin.set_fact:
+                    lxc_template_filename: >-
+                      {{ os_template }}_{{ lxc_release_info.codename }}_{{ target_arch }}_{{ lxc_latest_build | replace(':', '-') }}.tar.xz
+                    lxc_template_download_url: >-
+                      https://images.linuxcontainers.org/images/{{ lxc_release_info.distro }}/{{ lxc_release_info.codename }}/{{ target_arch }}/default/{{ lxc_latest_build }}/rootfs.tar.xz
+
+            - name: Ensure local image cache directory exists on the Ansible worker
+              ansible.builtin.file:
+                path: "{{ local_cache_dir }}"
+                state: directory
+                mode: "0755"
+              delegate_to: localhost
+              become: false
+
+            - name: Download LXC template on the Ansible worker
+              ansible.builtin.get_url:
+                url: "{{ lxc_template_download_url }}"
+                dest: "{{ local_cache_dir }}/{{ lxc_template_filename }}"
+                mode: "0644"
+                force: false
+              delegate_to: localhost
+              become: false
+
+            - name: Push LXC template to the Proxmox host's template cache
+              ansible.builtin.copy:
+                src: "{{ local_cache_dir }}/{{ lxc_template_filename }}"
+                dest: "/var/lib/vz/template/cache/{{ lxc_template_filename }}"
+                mode: "0644"
+
+        - name: Re-list LXC templates to resolve the stored volume ID
+          # Must filter on architecture too, not just the name - otherwise this
+          # can resolve back to a wrong-architecture leftover even when the
+          # staging block above just fetched the correct one (same class of bug
+          # as the "already staged" check above, confirmed live on an ARM host).
+          ansible.builtin.shell: |
+            set -o pipefail
+            pveam list {{ resolved_template_storage }} | awk -v tmpl="{{ os_template }}" -v arch="{{ target_arch }}" '$1 ~ tmpl && $1 ~ arch {print $1}'
+          args:
+            executable: /bin/bash
+          register: pveam_resolved
+          changed_when: false
+
+        - name: Set resolved template volume ID
+          ansible.builtin.set_fact:
+            lxc_template_volid: "{{ pveam_resolved.stdout_lines | first }}"
+
+        - name: Get next free container ID
+          ansible.builtin.command: pvesh get /cluster/nextid
+          register: nextid
+          changed_when: false
+
+        - name: Set new container ID fact
+          ansible.builtin.set_fact:
+            ctid: "{{ nextid.stdout | trim }}"
+
+        - name: Ensure the tun kernel module is loaded on the Proxmox host
+          # Required for Tailscale (or any VPN/WireGuard tool) to work inside an
+          # unprivileged LXC container - containers share the host kernel and
+          # can't load modules themselves, so this has to happen on the host.
+          ansible.builtin.command: modprobe tun
+          changed_when: false
+
+        - name: Persist the tun module across Proxmox host reboots
+          ansible.builtin.lineinfile:
+            path: /etc/modules-load.d/tun.conf
+            line: "tun"
+            create: true
+            mode: "0644"
+
+        - name: Create the LXC container
+          ansible.builtin.command: >-
+            pct create {{ ctid }} {{ lxc_template_volid }}
+            --hostname {{ ct_name }}
+            --memory {{ memory }}
+            --cores {{ cores }}
+            --rootfs {{ resolved_storage }}:{{ ct_disk_gb }}
+            --net0 name=eth0,bridge={{ resolved_bridge }},{{ 'ip=' ~ ct_ip ~ ',gw=' ~ ct_gateway if ct_ip | length > 0 else 'ip=dhcp' }}
+            --nameserver {{ ct_nameserver }}
+            --unprivileged 1
+            --features nesting=1
+          args:
+            creates: "/etc/pve/lxc/{{ ctid }}.conf"
+
+        - name: Allow TUN/TAP device access inside the (unprivileged) container for Tailscale
+          # --features nesting=1 alone isn't enough - /dev/net/tun has to be
+          # explicitly passed through, which isn't exposed as a `pct create
+          # --features` flag, only via raw lxc.* config lines.
+          ansible.builtin.blockinfile:
+            path: "/etc/pve/lxc/{{ ctid }}.conf"
+            marker: "# {mark} ANSIBLE MANAGED - TUN device passthrough for Tailscale"
+            block: |
+              lxc.cgroup2.devices.allow: c 10:200 rwm
+              lxc.mount.entry: /dev/net/tun dev/net/tun none bind,create=file
+
+        - name: Check for a Mali GPU device on this Proxmox host
+          ansible.builtin.stat:
+            path: /dev/mali0
+          register: mali_device
+          when: gpu_passthrough | bool
+
+        - name: Detect the Mali device's major:minor numbers
+          # Misc-class char devices (major 10) get their minor assigned
+          # dynamically at driver registration - can differ across
+          # boards/kernels, so this is looked up fresh each run rather than
+          # hardcoded.
+          when: gpu_passthrough | bool and mali_device.stat.exists
+          ansible.builtin.shell: |
+            set -o pipefail
+            ls -la /dev/mali0 | grep -oP '\d+,\s*\d+'
+          args:
+            executable: /bin/bash
+          register: mali_devnum
+          changed_when: false
+
+        - name: Check for DRM render nodes on this Proxmox host
+          ansible.builtin.stat:
+            path: /dev/dri
+          register: dri_device
+          when: gpu_passthrough | bool
+
+        - name: Warn if GPU passthrough was requested but no supported GPU device was found
+          when: gpu_passthrough | bool and not mali_device.stat.exists and not dri_device.stat.exists
+          ansible.builtin.debug:
+            msg: >-
+              gpu_passthrough was set but neither /dev/mali0 nor /dev/dri exist on this Proxmox host -
+              nothing was passed through. This playbook's GPU support currently only covers Mali/DRM
+              devices (as found on ARM/CIX hosts like this one); NVIDIA/AMD GPU passthrough isn't implemented yet.
+
+        - name: Loosen permissions on the Mali device so an unprivileged container can actually open it
+          # Confirmed live: mode=0666 on the lxc.mount.entry line below does
+          # NOT change permissions for a bind mount over an already-existing
+          # device file - that option only applies when LXC has to create a
+          # placeholder first. The container ends up seeing the host's real
+          # permissions (crw-rw---- root:render), which an unprivileged
+          # container's shifted UID/GID can never satisfy - resulting in a
+          # plain "Permission denied" when any userspace driver tries to
+          # open it, confirmed via vulkaninfo/panvk. Since a bind mount
+          # shares the same underlying file, chmod'ing the host's actual
+          # device file fixes visibility from inside the container too, and
+          # avoids needing the identity GID mapping that broke a prior
+          # manual attempt (newgidmap - this host's /etc/subgid doesn't
+          # grant root permission to identity-map the render group's GID).
+          # Trade-off worth knowing: this makes the device world-accessible
+          # on the host itself, not just to this one container - a minor
+          # security loosening (GPU access, not credentials/data),
+          # reasonable for a single-operator host but a real change.
+          when: gpu_passthrough | bool and mali_device.stat.exists
+          ansible.builtin.file:
+            path: /dev/mali0
+            mode: "0666"
+
+        - name: Loosen permissions on DRM render/card nodes so an unprivileged container can actually open them
+          when: gpu_passthrough | bool and dri_device.stat.exists
+          ansible.builtin.shell: |
+            set -o pipefail
+            chmod 0666 /dev/dri/render* /dev/dri/card* 2>/dev/null || true
+          args:
+            executable: /bin/bash
+          changed_when: true
+
+        - name: Allow GPU device passthrough inside the (unprivileged) container
+          # No custom lxc.idmap here - see the permission-loosening tasks
+          # above for why that's unnecessary once the host's own device
+          # files are world read/write.
+          when: gpu_passthrough | bool and (mali_device.stat.exists or dri_device.stat.exists)
+          ansible.builtin.blockinfile:
+            path: "/etc/pve/lxc/{{ ctid }}.conf"
+            marker: "# {mark} ANSIBLE MANAGED - GPU device passthrough"
+            block: |
+              {% if mali_device.stat.exists %}
+              lxc.cgroup2.devices.allow: c {{ mali_devnum.stdout | trim | regex_replace(',\s*', ':') }} rwm
+              lxc.mount.entry: /dev/mali0 dev/mali0 none bind,optional,create=file,mode=0666
+              {% endif %}
+              {% if dri_device.stat.exists %}
+              lxc.cgroup2.devices.allow: c 226:* rwm
+              lxc.mount.entry: /dev/dri dev/dri none bind,optional,create=dir,mode=0777
+              {% endif %}
+
+    - name: Check current container status
+      # Runs every time (new or reused container) - if a prior run created
+      # the container but was interrupted before finishing, or the
+      # container was stopped for any other reason, this catches it rather
+      # than assuming "the name exists" means "it's running and healthy."
+      ansible.builtin.command: pct status {{ ctid }}
+      register: ct_status
+      changed_when: false
+
+    - name: Start the container if it isn't already running
+      ansible.builtin.command: pct start {{ ctid }}
+      when: "'status: running' not in ct_status.stdout"
+      changed_when: true
+
+    - name: Ensure the container has a working IPv4 address, auto-falling back to a static IP if DHCP fails
+      # Runs every time, not just for brand-new containers - confirmed live:
+      # a container left over from an interrupted prior run can be reused
+      # by name while still stuck on a broken network from that earlier
+      # attempt. No one should ever have to already know this network's IPs
+      # just to launch a container - ct_ip/ct_gateway remain available as
+      # an explicit override, but the default path (both blank) tries DHCP
+      # first and, if it genuinely fails, figures out this host's own
+      # subnet/gateway and picks a free-looking address itself.
+      block:
+        - name: Wait for the container's eth0 to have an IPv4 address
+          ansible.builtin.command: pct exec {{ ctid }} -- ip -4 -o addr show eth0
+          register: ct_ipv4
+          until: ct_ipv4.rc == 0 and ct_ipv4.stdout | trim | length > 0
+          retries: 18
+          delay: 5
+          changed_when: false
+      rescue:
+        - name: Fail immediately if an explicit ct_ip was set and still didn't come up
+          ansible.builtin.fail:
+            msg: >-
+              ct_ip={{ ct_ip }}/ct_gateway={{ ct_gateway }} was set explicitly but the container's eth0
+              never got that address - check it's actually free and correct for this host's network.
+          when: ct_ip | length > 0
+
+        - name: DHCP failed - auto-detect this host's subnet/gateway and pick a free static IP
+          block:
+            - name: Detect this host's default route
+              # Deliberately NOT reading the bridge's own address -
+              # confirmed live that a bridge (vmbr0) can have no IPv4
+              # address of its own at all even though containers on it
+              # reach the real LAN fine (this host's own management IP
+              # lives on the physical eth0 NIC instead). The default
+              # route is a much more reliable source: it works
+              # regardless of which interface actually holds the
+              # host's address.
+              ansible.builtin.shell: |
+                set -o pipefail
+                ip -4 route show default
+              args:
+                executable: /bin/bash
+              register: host_default_route
+              changed_when: false
+
+            - name: Fail clearly if the host's own network info couldn't be determined
+              ansible.builtin.fail:
+                msg: >-
+                  DHCP failed for this container and the automatic static-IP fallback couldn't
+                  determine this host's own default route - pass ct_ip/ct_gateway explicitly.
+              when: host_default_route.stdout | trim | length == 0
+
+            - name: Extract the gateway from the host's default route
+              ansible.builtin.shell: |
+                set -o pipefail
+                echo '{{ host_default_route.stdout }}' | grep -oP 'via \K\S+'
+              args:
+                executable: /bin/bash
+              register: detected_gateway_result
+              changed_when: false
+
+            - name: Extract this host's own source IP from its default route
+              ansible.builtin.shell: |
+                set -o pipefail
+                echo '{{ host_default_route.stdout }}' | grep -oP 'src \K\S+'
+              args:
+                executable: /bin/bash
+              register: detected_host_ip_result
+              changed_when: false
+
+            - name: Fail clearly if the gateway or host IP couldn't be parsed out of the route
+              ansible.builtin.fail:
+                msg: >-
+                  Couldn't parse a gateway/source IP out of this host's default route
+                  ({{ host_default_route.stdout | trim }}) - pass ct_ip/ct_gateway explicitly.
+              when: detected_gateway_result.stdout | trim | length == 0 or detected_host_ip_result.stdout | trim | length == 0
+
+            - name: Set the detected gateway and host IP facts
+              ansible.builtin.set_fact:
+                detected_gateway: "{{ detected_gateway_result.stdout | trim }}"
+                detected_host_ip: "{{ detected_host_ip_result.stdout | trim }}"
+
+            - name: Compute the subnet base for candidate addresses
+              # Assumes a /24-style LAN (by far the most common
+              # home/office setup, confirmed on this host) - both for
+              # generating last-octet candidates to probe and for the
+              # real container config below, since there's no interface
+              # address here to read a real prefix length from.
+              ansible.builtin.set_fact:
+                static_ip_base: "{{ (detected_host_ip | split('.'))[:3] | join('.') }}"
+                static_ip_prefix: "24"
+
+            - name: Probe candidate addresses near the top of the subnet for one that's free
+              ansible.builtin.command: ping -c 1 -W 1 {{ static_ip_base }}.{{ item }}
+              register: ping_probe
+              failed_when: false
+              changed_when: false
+              loop: "{{ range(240, 251) | list }}"
+
+            - name: Collect addresses that didn't respond to ping (free candidates)
+              ansible.builtin.set_fact:
+                free_ip_candidates: "{{ ping_probe.results | selectattr('rc', 'ne', 0) | map(attribute='item') | list }}"
+
+            - name: Fail clearly if no free address was found in the probed range
+              ansible.builtin.fail:
+                msg: >-
+                  DHCP failed and no free address was found in {{ static_ip_base }}.240-250 for the
+                  automatic static-IP fallback - pass ct_ip/ct_gateway explicitly with a known-free address.
+              when: free_ip_candidates | length == 0
+
+            - name: Read back this container's current MAC address
+              ansible.builtin.shell: |
+                set -o pipefail
+                grep '^net0' /etc/pve/lxc/{{ ctid }}.conf | grep -oP 'hwaddr=\K[0-9A-Fa-f:]+'
+              args:
+                executable: /bin/bash
+              register: ct_hwaddr
+              changed_when: false
+
+            - name: Apply the auto-picked static IP to the container
+              ansible.builtin.set_fact:
+                auto_static_ip: "{{ static_ip_base }}.{{ free_ip_candidates | first }}"
+
+            - name: Reconfigure the container's network with the auto-picked static IP
+              ansible.builtin.command: >-
+                pct set {{ ctid }} --net0
+                name=eth0,bridge={{ resolved_bridge }},hwaddr={{ ct_hwaddr.stdout | trim }},ip={{ auto_static_ip }}/{{ static_ip_prefix }},gw={{ detected_gateway }}
+              changed_when: true
+
+            - name: Restart networking inside the container to pick up the static IP
+              ansible.builtin.command: pct exec {{ ctid }} -- systemctl restart systemd-networkd
+              changed_when: true
+
+            - name: Verify the auto-picked static IP actually came up
+              ansible.builtin.command: pct exec {{ ctid }} -- ip -4 -o addr show eth0
+              register: ct_ipv4_retry
+              until: ct_ipv4_retry.rc == 0 and ct_ipv4_retry.stdout | trim | length > 0
+              retries: 6
+              delay: 5
+              changed_when: false
+
+    - name: Check if Docker is already installed inside the container
+      ansible.builtin.command: pct exec {{ ctid }} -- docker --version
+      register: docker_check
+      changed_when: false
+      failed_when: false
+
+    - name: Install Docker inside the container
+      # Runs every time, not just for brand-new containers - same
+      # idempotent-and-self-healing approach as the rest of this playbook:
+      # apt-get install is a safe no-op if Docker is already correctly
+      # installed, so always attempting it here fixes a broken prior
+      # install instead of silently trusting a name match. This is the
+      # only "app" this playbook installs - deploy actual apps afterward
+      # with Install_Docker_And_App.yml (see the docker_apps note near
+      # expose_to_internet above).
+      when: docker_check.rc != 0
+      ansible.builtin.command: >-
+        pct exec {{ ctid }} -- bash -c "apt-get update && apt-get install -y docker.io docker-compose-v2"
+      changed_when: true
+
+    - name: Ensure Docker service is running and enabled inside the container
+      ansible.builtin.command: pct exec {{ ctid }} -- systemctl enable --now docker
+      changed_when: true
+
+    - name: Render the Tailscale join script content (matches post_boot.sh's proven flags)
+      ansible.builtin.set_fact:
+        tailscale_join_script: "{{ lookup('template', playbook_dir + '/templates/tailscale-join.sh.j2') }}"
+      vars:
+        tailscale_hostname: "{{ ct_name }}"
+      no_log: true
+
+    - name: Stage the join script on the Proxmox host
+      ansible.builtin.copy:
+        content: "{{ tailscale_join_script }}"
+        dest: "/tmp/{{ ct_name }}-tailscale-join.sh"
+        mode: "0700"
+      no_log: true
+
+    - name: Push the join script into the container
+      ansible.builtin.command: pct push {{ ctid }} /tmp/{{ ct_name }}-tailscale-join.sh /root/tailscale-join.sh --perms 700
+      changed_when: true
+
+    - name: Remove the staged script from the Proxmox host
+      ansible.builtin.file:
+        path: "/tmp/{{ ct_name }}-tailscale-join.sh"
+        state: absent
+
+    - name: Start the Tailscale join script inside the container as a transient systemd unit
+      # nohup/disown don't reliably survive `pct exec` (lxc-attach) ending its session -
+      # the container runtime can clean up the whole process scope tied to that exec
+      # call regardless. systemd-run hands the process to PID 1 instead, which is
+      # independent of this exec session and can't be killed by it. Also runs every
+      # time - tailscale up is itself idempotent (safe no-op if already joined).
+      ansible.builtin.command: >-
+        pct exec {{ ctid }} -- systemd-run --unit=tailscale-join --collect --no-block /root/tailscale-join.sh
+      changed_when: true
+      no_log: true
+
+    - name: Check (briefly) whether the container is already reachable over the tailnet
+      ansible.builtin.wait_for:
+        host: "{{ ct_name }}"
+        port: 22
+        timeout: 60
+      delegate_to: localhost
+      become: false
+      register: lxc_tailnet_reachability
+      ignore_errors: true
+
+    - name: Show access instructions
+      # No expose_to_internet handling here - this playbook only creates
+      # the container and gets Docker running on it. Deploy AND expose
+      # actual apps with Install_Docker_And_App.yml afterward (targeting
+      # this container by ct_name, vm_user: "root") - see that playbook's
+      # own exposure model (path routing, tcp_funnel_port, etc.).
+      ansible.builtin.debug:
+        msg: >-
+          LXC container '{{ ct_name }}' (CTID {{ ctid }}) is created with Docker installed and running.
+          {{ 'It is already reachable over Tailscale SSH as ' ~ ct_name ~ '.'
+             if lxc_tailnet_reachability is succeeded
+             else 'Not yet confirmed reachable over the tailnet - most likely still pending manual approval in '
+                  ~ 'your Tailscale admin console. Approve it there before deploying anything onto it.' }}
+          Deploy and expose apps onto it with Install_Docker_And_App.yml, using target_host="{{ ct_name }}"
+          and vm_user="root".

@@ -1,0 +1,321 @@
+---
+- name: Ensure OS template exists, clone a VM from it, and join it to the tailnet
+  hosts: all
+  gather_facts: true
+  become: true
+
+  vars_files:
+    - vars/os_images.yml
+
+  vars:
+    proxmox_host: "{{ inventory_hostname }}"
+    iso_dir: "/var/lib/vz/template/iso"
+    local_cache_dir: "{{ playbook_dir }}/.image_cache"
+    # Leave blank (default) to auto-detect from this host - picks the first
+    # active storage that supports VM disk images. Confirmed live on a
+    # different host: hardcoding "local-lvm" broke outright on a host that
+    # only has "local" - not every Proxmox host has the same storage
+    # layout, and the caller shouldn't have to already know this host's
+    # specific setup just to launch a VM. Only set this explicitly if a
+    # host has multiple valid options and you need a non-default one.
+    storage: ""                          # From AWX Survey
+    # Leave blank (default) to auto-detect - picks vmbr0 if present (the
+    # standard Proxmox default), otherwise the first bridge interface found
+    # on the host. Only set this explicitly on a host with multiple bridges
+    # where vmbr0 isn't the right one.
+    bridge: ""                            # From AWX Survey
+
+    os_type: "ubuntu-24.04"               # From AWX Survey - any key from vars/os_images.yml (ubuntu-24.04 | ubuntu-22.04 | debian-12)
+
+    # Multi-arch support: vars/os_images.yml's URLs are all written for
+    # amd64 (Ubuntu/Debian's publishing convention embeds the arch name in
+    # the filename, e.g. noble-server-cloudimg-amd64.img). On an amd64 host
+    # this is a no-op substitution (amd64 -> amd64), so existing behavior
+    # is completely unchanged there - on an arm64 host it swaps in the
+    # genuinely-published arm64 variant at the same predictable path,
+    # mirroring the same pattern already proven for LXC templates.
+    vm_arch_map:
+      x86_64: amd64
+      aarch64: arm64
+    target_arch: "{{ vm_arch_map[ansible_architecture] | default(ansible_architecture) }}"
+
+    vm_name: "dev-vm01"                    # From AWX Survey
+    vm_user: "pronto"                      # From AWX Survey - standard automation user, matches post_boot.sh's baremetal convention
+    memory: 2048                            # From AWX Survey
+    cores: 2                                # From AWX Survey
+    disk_size: "15G"                        # From AWX Survey
+
+    # From AWX Credential/Vault - a Reusable + Tagged Tailscale auth key
+    # (not Ephemeral - this VM should persist in the tailnet across reboots).
+    # Never hardcode a real key here.
+    tailscale_authkey: ""
+    tailscale_tag: "tag:vm-provisioned"
+    vm_ssh_public_key: "{{ lookup('file', playbook_dir + '/id_rsa.pub') }}"
+
+    # Private by default - only expose to the real internet if explicitly
+    # asked. Handled here (not left to a separate Expose_App_To_Internet.yml
+    # run) so a single job creates a publicly-reachable VM in one shot.
+    expose_to_internet: false                # From AWX Survey
+    expose_port: 80                          # From AWX Survey
+
+  tasks:
+    - name: Validate VM disk storage against this host, auto-correcting if invalid or unset
+      # Runs every time, not just when storage is blank - a stale AWX
+      # Survey default, an old saved extra_vars, or a value copied from a
+      # different host are all just as invalid as leaving it blank. Always
+      # ask the host what's actually there and correct to a real answer
+      # rather than trusting the input blindly.
+      block:
+        - name: List active storages on this host that support VM disk images
+          ansible.builtin.shell: |
+            set -o pipefail
+            pvesm status --content images --enabled 1 | awk 'NR>1 {print $1}'
+          args:
+            executable: /bin/bash
+          register: image_storages
+          changed_when: false
+
+        - name: Fail clearly if no image-capable storage was found
+          ansible.builtin.fail:
+            msg: >-
+              No active storage on this Proxmox host supports VM disk images (content type
+              'images') - check 'pvesm status' on the host.
+          when: image_storages.stdout_lines | length == 0
+
+        - name: Warn when the requested VM disk storage isn't valid on this host
+          when: storage | length > 0 and storage not in image_storages.stdout_lines
+          ansible.builtin.debug:
+            msg: >-
+              storage='{{ storage }}' isn't a valid VM-image storage on this host (or wasn't set) -
+              auto-correcting to '{{ image_storages.stdout_lines | first }}'.
+              Available on this host: {{ image_storages.stdout_lines | join(', ') }}.
+
+        - name: Resolve the VM disk storage to use (requested value if valid, otherwise auto-detected)
+          # Named resolved_storage, NOT storage - set_fact can never
+          # override storage here if it also arrived as an extra_var
+          # (extra_vars have Ansible's highest precedence, above set_fact,
+          # so a same-named "correction" is silently ignored and the
+          # original extra_var value wins every later reference). Confirmed
+          # live: this exact mechanism was why an AWX Survey's stale
+          # storage=local-lvm default kept reaching pct create/qm unchanged
+          # despite this same validation logic supposedly correcting it.
+          ansible.builtin.set_fact:
+            resolved_storage: >-
+              {{ storage if (storage | length > 0 and storage in image_storages.stdout_lines)
+                 else image_storages.stdout_lines | first }}
+
+    - name: Validate network bridge against this host, auto-correcting if invalid or unset
+      block:
+        - name: List bridge interfaces on this host
+          ansible.builtin.shell: |
+            set -o pipefail
+            ip -o link show type bridge | awk -F': ' '{print $2}'
+          args:
+            executable: /bin/bash
+          register: host_bridges
+          changed_when: false
+
+        - name: Fail clearly if no bridge interface was found
+          ansible.builtin.fail:
+            msg: >-
+              No bridge interface found on this Proxmox host - check 'ip link show type bridge' on the host.
+          when: host_bridges.stdout_lines | length == 0
+
+        - name: Warn when the requested bridge isn't valid on this host
+          when: bridge | length > 0 and bridge not in host_bridges.stdout_lines
+          ansible.builtin.debug:
+            msg: >-
+              bridge='{{ bridge }}' doesn't exist on this host (or wasn't set) - auto-correcting to
+              '{{ 'vmbr0' if 'vmbr0' in host_bridges.stdout_lines else host_bridges.stdout_lines | first }}'.
+              Available on this host: {{ host_bridges.stdout_lines | join(', ') }}.
+
+        - name: Resolve the bridge to use (requested value if valid, otherwise auto-detected, prefers vmbr0)
+          ansible.builtin.set_fact:
+            resolved_bridge: >-
+              {{ bridge if (bridge | length > 0 and bridge in host_bridges.stdout_lines)
+                 else ('vmbr0' if 'vmbr0' in host_bridges.stdout_lines else host_bridges.stdout_lines | first) }}
+
+    - name: Ensure the requested OS template exists
+      # create_template_block.yml expects current_os_type - that name comes
+      # from Create_MultiVM_Template.yml's loop (loop_control: loop_var:
+      # current_os_type), a separate wrapper for pre-seeding several
+      # templates at once. This playbook calls the same shared task file
+      # directly, not in a loop, and never wired that variable through -
+      # a genuine pre-existing gap, confirmed live ("current_os_type is
+      # undefined"), not something introduced by today's changes.
+      ansible.builtin.include_tasks: create_template_block.yml
+      vars:
+        current_os_type: "{{ os_type }}"
+
+    - name: Check whether a VM with this name already exists
+      ansible.builtin.shell: |
+        set -o pipefail
+        qm list | awk -v name="{{ vm_name }}" '$2==name {print $1}'
+      args:
+        executable: /bin/bash
+      register: existing_vm
+      changed_when: false
+
+    - name: Record existing VM ID, if found
+      ansible.builtin.set_fact:
+        new_vmid: "{{ existing_vm.stdout | trim }}"
+      when: existing_vm.stdout | trim | length > 0
+
+    - name: Read the existing VM's config, if found
+      when: existing_vm.stdout | trim | length > 0
+      ansible.builtin.command: qm config {{ existing_vm.stdout | trim }}
+      register: existing_vm_config
+      changed_when: false
+
+    - name: Stop the existing VM before destroying it, if it's not actually finished
+      # qm destroy refuses to touch a running VM - confirmed live ("VM 101
+      # is running - destroy failed"). A broken/diskless VM can still be
+      # left running (it was started, just never got a working disk), so
+      # stop it first rather than assuming a leftover is always stopped.
+      when: >-
+        existing_vm.stdout | trim | length > 0 and 'scsi0:' not in existing_vm_config.stdout
+      ansible.builtin.command: qm stop {{ existing_vm.stdout | trim }}
+      failed_when: false
+      changed_when: true
+
+    - name: Destroy an existing VM that never actually finished cloning
+      # Same idempotency gap as the template check above and the LXC side
+      # earlier - a name match alone can't tell a genuinely working clone
+      # from one produced while the source template was still broken (no
+      # real disk). Verify it actually has a disk before trusting it.
+      # Retries because qm stop above doesn't block until the VM is fully
+      # powered off - destroy can still transiently see it as running.
+      when: >-
+        existing_vm.stdout | trim | length > 0 and 'scsi0:' not in existing_vm_config.stdout
+      ansible.builtin.command: qm destroy {{ existing_vm.stdout | trim }} --purge
+      register: destroyed_incomplete_vm
+      until: destroyed_incomplete_vm.rc == 0
+      retries: 6
+      delay: 5
+      changed_when: true
+
+    - name: Clone and configure the VM if one with this name doesn't already exist (or was just destroyed for being incomplete)
+      when: existing_vm.stdout | trim | length == 0 or destroyed_incomplete_vm is changed
+      block:
+        - name: Get next free VM ID
+          ansible.builtin.command: pvesh get /cluster/nextid
+          register: nextid
+          changed_when: false
+
+        - name: Set new VM ID fact
+          ansible.builtin.set_fact:
+            new_vmid: "{{ nextid.stdout | trim }}"
+
+        - name: Clone the VM from the template
+          ansible.builtin.command: qm clone {{ template_id }} {{ new_vmid }} --name {{ vm_name }} --full
+          changed_when: true
+
+        - name: Configure cloned VM hardware
+          ansible.builtin.command: >-
+            qm set {{ new_vmid }}
+            --memory {{ memory }}
+            --cores {{ cores }}
+            --net0 virtio,bridge={{ resolved_bridge }}
+          changed_when: true
+
+        - name: Resize VM disk
+          ansible.builtin.command: qm resize {{ new_vmid }} scsi0 {{ disk_size }}
+          changed_when: true
+
+        - name: Ensure Proxmox snippets storage directory exists
+          ansible.builtin.file:
+            path: /var/lib/vz/snippets
+            state: directory
+            mode: "0755"
+
+        - name: Render the Tailscale join script content (matches post_boot.sh's proven flags)
+          ansible.builtin.set_fact:
+            tailscale_join_script: "{{ lookup('template', playbook_dir + '/templates/tailscale-join.sh.j2') }}"
+          vars:
+            tailscale_hostname: "{{ vm_name }}"
+          no_log: true
+
+        - name: Render per-VM cloud-init user-data onto the Proxmox host
+          ansible.builtin.template:
+            src: vm-cloud-init.yml.j2
+            dest: "/var/lib/vz/snippets/{{ vm_name }}-cloud-init.yml"
+            mode: "0600"
+          no_log: true
+
+        - name: Attach custom cloud-init user-data and DHCP networking to the VM
+          ansible.builtin.command: >-
+            qm set {{ new_vmid }}
+            --cicustom "user=local:snippets/{{ vm_name }}-cloud-init.yml"
+            --ipconfig0 ip=dhcp
+          changed_when: true
+
+        - name: Start the VM
+          ansible.builtin.command: qm start {{ new_vmid }}
+          changed_when: true
+
+    - name: Check (briefly) whether the VM is already reachable over the tailnet
+      ansible.builtin.wait_for:
+        host: "{{ vm_name }}"
+        port: 22
+        timeout: 60
+      delegate_to: localhost
+      become: false
+      register: tailnet_reachability
+      ignore_errors: true
+
+    - name: Expose this VM to the public internet via Tailscale Funnel
+      # Private by default. Only runs when explicitly requested. Approval can
+      # take anywhere from seconds to days, so this doesn't wait or fail on
+      # it here - it hands off to a detached script running inside the VM
+      # that polls until approved, then enables Funnel on its own (same
+      # script/behavior as Install_Docker_And_App.yml and Create_LXC_App.yml).
+      # Delivered via 'qm guest exec', not SSH: this playbook only has
+      # Proxmox-host access at this point, and the VM may not be
+      # tailnet-reachable yet (that's exactly the approval wait above) - the
+      # QEMU guest agent works over the hypervisor channel regardless of
+      # tailnet/network state, so it doesn't need to wait for either.
+      when: expose_to_internet | bool
+      block:
+        - name: Render the Tailscale Funnel enable script content
+          ansible.builtin.set_fact:
+            funnel_enable_script: "{{ lookup('template', playbook_dir + '/templates/enable-funnel.sh.j2') }}"
+          vars:
+            tailscale_hostname: "{{ vm_name }}"
+            funnel_port: "{{ expose_port }}"
+
+        - name: Wait for the QEMU guest agent to be ready inside the VM
+          ansible.builtin.command: qm guest cmd {{ new_vmid }} ping
+          register: guest_agent_ping
+          until: guest_agent_ping.rc == 0
+          retries: 30
+          delay: 10
+          changed_when: false
+
+        - name: Push the Funnel enable script into the VM via the guest agent
+          # No direct equivalent of `pct push` for VMs - base64 the content
+          # and decode it on the other side of a single `qm guest exec` call.
+          ansible.builtin.command: >-
+            qm guest exec {{ new_vmid }} -- bash -c
+            "echo {{ funnel_enable_script | b64encode }} | base64 -d > /usr/local/bin/enable-funnel.sh && chmod 700 /usr/local/bin/enable-funnel.sh"
+          changed_when: true
+
+        - name: Start the Funnel enable script inside the VM as a detached systemd unit
+          ansible.builtin.command: >-
+            qm guest exec {{ new_vmid }} -- systemd-run --unit=enable-funnel --collect --no-block /usr/local/bin/enable-funnel.sh
+          changed_when: true
+
+    - name: Show result
+      ansible.builtin.debug:
+        msg: >-
+          VM '{{ vm_name }}' (VMID {{ new_vmid }}) is present and started - re-running this job with the same
+          vm_name reuses the existing VM instead of cloning a duplicate.
+          {{ 'It is already reachable over Tailscale SSH.'
+             if tailnet_reachability is succeeded
+             else 'Not yet confirmed reachable over the tailnet - most likely still pending manual approval in '
+                  ~ 'your Tailscale admin console (see complete_project_guide.txt step 2). Approve it there; '
+                  ~ 'no need to re-run this job once approved, just proceed to Install Docker/LXC whenever ready.' }}
+          {{ ('A background script on ' ~ vm_name ~ ' is waiting for tailnet admin approval, then will expose it '
+              ~ 'at https://' ~ vm_name ~ '.<your-tailnet>.ts.net - check /var/log/tailscale-funnel.log there for status.')
+             if (expose_to_internet | bool)
+             else ('Private - reachable only over the tailnet at ' ~ vm_name ~ ' (or its tailnet IP).'
+                   ~ ' Re-run this job with expose_to_internet=true if you want it public.') }}
