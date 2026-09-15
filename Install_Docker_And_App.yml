@@ -3,8 +3,8 @@
   hosts: localhost
   gather_facts: false
   vars:
-    target_host: "edgecompute-lxc02"  # HARDCODED for UI testing - targets the LXC from Create_LXC_App.yml's test run
-    vm_user: "root"                   # HARDCODED for UI testing - "root" because target_host above is an LXC container, not a VM
+    target_host: "edgecompute-vm02"   # HARDCODED for UI testing - deploying Odoo onto the VM this time
+    vm_user: "pronto"                 # HARDCODED for UI testing - "pronto" because target_host above is a VM, not an LXC
   tasks:
     - name: Force target_host/vm_user for this UI-testing round, ignoring whatever the caller supplies
       # extra_vars (AWX Job Template "Extra Variables", or a launch-time
@@ -17,8 +17,8 @@
       # extra_var. Computing distinctly-named facts and using ONLY those
       # names downstream is the one way around it.
       ansible.builtin.set_fact:
-        resolved_target_host: "edgecompute-lxc02"
-        resolved_vm_user: "root"
+        resolved_target_host: "edgecompute-vm02"
+        resolved_vm_user: "pronto"
 
     - name: Add target VM to in-memory inventory
       ansible.builtin.add_host:
@@ -68,14 +68,39 @@
     # vars/docker_apps.yml); a name with no matching preset is a fully
     # custom app and needs its own image/port.
     docker_apps:
-      # HARDCODED for UI testing - "edgecompute-" prefix so the deployed
-      # container itself is identifiable, not just its parent VM/LXC.
-      # No longer matches the "nginx" catalog key by name, so image/port
-      # are given explicitly instead of relying on the catalog default.
-      - name: edgecompute-nginx
-        image: "nginx:latest"
-        port: 80
+      # HARDCODED for UI testing - public Odoo (POS) instance on edgecompute-vm02.
+      # Odoo needs a real Postgres backend (no SQLite support) - deployed as
+      # its own docker_apps entry, internal-only, reachable from the odoo
+      # entry via the shared "internal" Docker network using its service
+      # name "odoo-db" as the hostname (generic-app.yml.j2 always joins
+      # "internal" regardless of expose_http, and Docker's embedded DNS
+      # resolves service names across separate compose projects on the same
+      # external network - confirmed by reading the template directly).
+      # SECURITY NOTE: this password is a fresh credential generated for
+      # this deployment, not a pre-existing secret - still, once this is
+      # git-committed it's in plaintext history like everything else
+      # hardcoded this round. Change it (in both entries, they must match)
+      # before any real customer/POS data goes through this.
+      - name: odoo-db
+        image: "postgres:15"
+        port: 5432
+        expose_http: false
+        environment:
+          POSTGRES_USER: odoo
+          POSTGRES_PASSWORD: "yY0V4RRgRQizF5ld2uRbyi-J0Rf2cLYk"
+          POSTGRES_DB: postgres
+        volumes:
+          - "odoo_db_data:/var/lib/postgresql/data"
+      - name: odoo
+        image: "odoo:latest"
+        port: 8069
         path_prefix: "/"
+        environment:
+          HOST: odoo-db
+          USER: odoo
+          PASSWORD: "yY0V4RRgRQizF5ld2uRbyi-J0Rf2cLYk"
+        volumes:
+          - "odoo_data:/var/lib/odoo"
     wordpress_db_password: ""                  # From AWX Survey/Vault - required when wordpress is in docker_apps
     # HARDCODED true for this UI-testing round - want the deployed app
     # publicly reachable right away, no separate step needed. Covers every
