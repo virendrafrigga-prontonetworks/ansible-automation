@@ -5,7 +5,7 @@
   become: true
 
   vars:
-    vm_name: "dev-vm01"          # From AWX Survey - the VM to delete, by name
+    vm_name: "vm-test01"          # HARDCODED for UI testing - matches Create_VM_From_MultiVM_Template.yml's test vm_name
 
   tasks:
     - name: Look up the VM's ID by name

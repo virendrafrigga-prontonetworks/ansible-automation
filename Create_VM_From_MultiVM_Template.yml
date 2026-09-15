@@ -18,12 +18,12 @@
     # layout, and the caller shouldn't have to already know this host's
     # specific setup just to launch a VM. Only set this explicitly if a
     # host has multiple valid options and you need a non-default one.
-    storage: ""                          # From AWX Survey
+    storage: "local-lvm"                  # HARDCODED for UI testing - frontend can't pass extra_vars yet
     # Leave blank (default) to auto-detect - picks vmbr0 if present (the
     # standard Proxmox default), otherwise the first bridge interface found
     # on the host. Only set this explicitly on a host with multiple bridges
     # where vmbr0 isn't the right one.
-    bridge: ""                            # From AWX Survey
+    bridge: "vmbr0"                       # HARDCODED for UI testing - frontend can't pass extra_vars yet
 
     os_type: "ubuntu-24.04"               # From AWX Survey - any key from vars/os_images.yml (ubuntu-24.04 | ubuntu-22.04 | debian-12)
 
@@ -39,7 +39,7 @@
       aarch64: arm64
     target_arch: "{{ vm_arch_map[ansible_architecture] | default(ansible_architecture) }}"
 
-    vm_name: "dev-vm01"                    # From AWX Survey
+    vm_name: "vm-test01"                   # HARDCODED for UI testing - frontend can't pass extra_vars yet
     vm_user: "pronto"                      # From AWX Survey - standard automation user, matches post_boot.sh's baremetal convention
     memory: 2048                            # From AWX Survey
     cores: 2                                # From AWX Survey
@@ -47,8 +47,11 @@
 
     # From AWX Credential/Vault - a Reusable + Tagged Tailscale auth key
     # (not Ephemeral - this VM should persist in the tailnet across reboots).
-    # Never hardcode a real key here.
-    tailscale_authkey: ""
+    # TEMPORARY for UI testing only, since the frontend can't inject secrets
+    # yet - paste a real key below before running, then rotate/regenerate it
+    # in the Tailscale admin console once this hardcoded-value test round is
+    # done, since it will be sitting in git history from here on.
+    tailscale_authkey: "PASTE_YOUR_TAILSCALE_AUTHKEY_HERE"
     tailscale_tag: "tag:vm-provisioned"
     vm_ssh_public_key: "{{ lookup('file', playbook_dir + '/id_rsa.pub') }}"
 

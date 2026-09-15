@@ -3,8 +3,8 @@
   hosts: localhost
   gather_facts: false
   vars:
-    target_host: "dev-vm01"          # From AWX Survey - the VM's tailnet hostname (vm_name from Playbook 1)
-    vm_user: "pronto"                 # From AWX Survey - must match the vm_user used to provision this VM
+    target_host: "docker-lxc-test01"  # HARDCODED for UI testing - frontend can't pass extra_vars yet (targets the LXC from Create_LXC_App.yml's test run)
+    vm_user: "root"                   # HARDCODED for UI testing - "root" because target_host above is an LXC container, not a VM
   tasks:
     - name: Add target VM to in-memory inventory
       ansible.builtin.add_host:

@@ -5,7 +5,7 @@
   become: true
 
   vars:
-    ct_name: "app-lxc01"          # From AWX Survey - the container to delete, by name
+    ct_name: "docker-lxc-test01"  # HARDCODED for UI testing - matches Create_LXC_App.yml's test ct_name
 
   tasks:
     - name: Look up the container's ID by name
