@@ -12,10 +12,19 @@
     ct_name: "edgecompute-lxc01"  # HARDCODED for UI testing - matches Create_LXC_App.yml's test ct_name
 
   tasks:
+    - name: Force the container name for this UI-testing round, ignoring any ct_name the caller supplies
+      # See the matching note in Create_LXC_App.yml - the EdgeCompute
+      # frontend was stamping ct_name with a generic
+      # "<inventory name> / <host IP>" label on every launch, and extra_vars
+      # always outrank this file's own vars: block, so reassigning ct_name
+      # itself would be silently ignored.
+      ansible.builtin.set_fact:
+        resolved_ct_name: "edgecompute-lxc01"
+
     - name: Look up the container's ID by name
       ansible.builtin.shell: |
         set -o pipefail
-        pct list | awk -v name="{{ ct_name }}" '$3==name {print $1}'
+        pct list | awk -v name="{{ resolved_ct_name }}" '$3==name {print $1}'
       args:
         executable: /bin/bash
       register: existing_ct
@@ -24,7 +33,7 @@
     - name: Report and stop here if no container with this name exists
       when: existing_ct.stdout | trim | length == 0
       ansible.builtin.debug:
-        msg: "No LXC container named '{{ ct_name }}' found - nothing to delete."
+        msg: "No LXC container named '{{ resolved_ct_name }}' found - nothing to delete."
 
     - name: Stop and destroy the container
       when: existing_ct.stdout | trim | length > 0
@@ -42,4 +51,4 @@
 
         - name: Show result
           ansible.builtin.debug:
-            msg: "LXC container '{{ ct_name }}' (CTID {{ target_ctid }}) has been destroyed."
+            msg: "LXC container '{{ resolved_ct_name }}' (CTID {{ target_ctid }}) has been destroyed."

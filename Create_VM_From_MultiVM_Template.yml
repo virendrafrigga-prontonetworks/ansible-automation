@@ -71,6 +71,20 @@
     expose_port: 80                          # From AWX Survey
 
   tasks:
+    - name: Force the VM name for this UI-testing round, ignoring any vm_name the caller supplies
+      # extra_vars (AWX Job Template "Extra Variables", or a launch-time
+      # payload) always outrank this file's own vars: block, so a bad
+      # vm_name arriving that way (confirmed live: the EdgeCompute frontend
+      # was stamping vm_name/ct_name/target_host with a generic
+      # "<inventory name> / <host IP>" label on every launch) can't be
+      # fixed by reassigning vm_name itself - set_fact can never override a
+      # variable that also arrived as an extra_var. Computing a
+      # distinctly-named fact and using ONLY that name downstream (same
+      # pattern as resolved_storage/resolved_bridge below) is the one way
+      # around it.
+      ansible.builtin.set_fact:
+        resolved_vm_name: "edgecompute-vm01"
+
     - name: Validate VM disk storage against this host, auto-correcting if invalid or unset
       # Runs every time, not just when storage is blank - a stale AWX
       # Survey default, an old saved extra_vars, or a value copied from a
@@ -162,7 +176,7 @@
     - name: Check whether a VM with this name already exists
       ansible.builtin.shell: |
         set -o pipefail
-        qm list | awk -v name="{{ vm_name }}" '$2==name {print $1}'
+        qm list | awk -v name="{{ resolved_vm_name }}" '$2==name {print $1}'
       args:
         executable: /bin/bash
       register: existing_vm
@@ -223,7 +237,7 @@
           # after Jinja substitution, so an unquoted value containing spaces
           # (e.g. an unexpected extra_vars override) silently breaks into
           # multiple stray positional args instead of failing cleanly.
-          ansible.builtin.command: qm clone {{ template_id }} {{ new_vmid }} --name "{{ vm_name }}" --full
+          ansible.builtin.command: qm clone {{ template_id }} {{ new_vmid }} --name "{{ resolved_vm_name }}" --full
           changed_when: true
 
         - name: Configure cloned VM hardware
@@ -248,20 +262,20 @@
           ansible.builtin.set_fact:
             tailscale_join_script: "{{ lookup('template', playbook_dir + '/templates/tailscale-join.sh.j2') }}"
           vars:
-            tailscale_hostname: "{{ vm_name }}"
+            tailscale_hostname: "{{ resolved_vm_name }}"
           no_log: true
 
         - name: Render per-VM cloud-init user-data onto the Proxmox host
           ansible.builtin.template:
             src: vm-cloud-init.yml.j2
-            dest: "/var/lib/vz/snippets/{{ vm_name }}-cloud-init.yml"
+            dest: "/var/lib/vz/snippets/{{ resolved_vm_name }}-cloud-init.yml"
             mode: "0600"
           no_log: true
 
         - name: Attach custom cloud-init user-data and DHCP networking to the VM
           ansible.builtin.command: >-
             qm set {{ new_vmid }}
-            --cicustom "user=local:snippets/{{ vm_name }}-cloud-init.yml"
+            --cicustom "user=local:snippets/{{ resolved_vm_name }}-cloud-init.yml"
             --ipconfig0 ip=dhcp
           changed_when: true
 
@@ -271,7 +285,7 @@
 
     - name: Check (briefly) whether the VM is already reachable over the tailnet
       ansible.builtin.wait_for:
-        host: "{{ vm_name }}"
+        host: "{{ resolved_vm_name }}"
         port: 22
         timeout: 60
       delegate_to: localhost
@@ -296,7 +310,7 @@
           ansible.builtin.set_fact:
             funnel_enable_script: "{{ lookup('template', playbook_dir + '/templates/enable-funnel.sh.j2') }}"
           vars:
-            tailscale_hostname: "{{ vm_name }}"
+            tailscale_hostname: "{{ resolved_vm_name }}"
             funnel_port: "{{ expose_port }}"
 
         - name: Wait for the QEMU guest agent to be ready inside the VM
@@ -323,15 +337,15 @@
     - name: Show result
       ansible.builtin.debug:
         msg: >-
-          VM '{{ vm_name }}' (VMID {{ new_vmid }}) is present and started - re-running this job with the same
+          VM '{{ resolved_vm_name }}' (VMID {{ new_vmid }}) is present and started - re-running this job with the same
           vm_name reuses the existing VM instead of cloning a duplicate.
           {{ 'It is already reachable over Tailscale SSH.'
              if tailnet_reachability is succeeded
              else 'Not yet confirmed reachable over the tailnet - most likely still pending manual approval in '
                   ~ 'your Tailscale admin console (see complete_project_guide.txt step 2). Approve it there; '
                   ~ 'no need to re-run this job once approved, just proceed to Install Docker/LXC whenever ready.' }}
-          {{ ('A background script on ' ~ vm_name ~ ' is waiting for tailnet admin approval, then will expose it '
-              ~ 'at https://' ~ vm_name ~ '.<your-tailnet>.ts.net - check /var/log/tailscale-funnel.log there for status.')
+          {{ ('A background script on ' ~ resolved_vm_name ~ ' is waiting for tailnet admin approval, then will expose it '
+              ~ 'at https://' ~ resolved_vm_name ~ '.<your-tailnet>.ts.net - check /var/log/tailscale-funnel.log there for status.')
              if (expose_to_internet | bool)
-             else ('Private - reachable only over the tailnet at ' ~ vm_name ~ ' (or its tailnet IP).'
+             else ('Private - reachable only over the tailnet at ' ~ resolved_vm_name ~ ' (or its tailnet IP).'
                    ~ ' Re-run this job with expose_to_internet=true if you want it public.') }}

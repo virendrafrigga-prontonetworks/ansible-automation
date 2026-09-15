@@ -104,6 +104,20 @@
       debian-12-standard: { distro: debian, codename: bookworm }
 
   tasks:
+    - name: Force the container name for this UI-testing round, ignoring any ct_name the caller supplies
+      # extra_vars (AWX Job Template "Extra Variables", or a launch-time
+      # payload) always outrank this file's own vars: block, so a bad
+      # ct_name arriving that way (confirmed live: the EdgeCompute frontend
+      # was stamping vm_name/ct_name/target_host with a generic
+      # "<inventory name> / <host IP>" label on every launch) can't be
+      # fixed by reassigning ct_name itself - set_fact can never override a
+      # variable that also arrived as an extra_var. Computing a
+      # distinctly-named fact and using ONLY that name downstream (same
+      # pattern as resolved_storage/resolved_bridge below) is the one way
+      # around it.
+      ansible.builtin.set_fact:
+        resolved_ct_name: "edgecompute-lxc01"
+
     - name: Validate rootfs storage against this host, auto-correcting if invalid or unset
       # Runs every time, not just when storage is blank - a stale AWX
       # Survey default, an old saved extra_vars, or a value copied from a
@@ -221,7 +235,7 @@
     - name: Check whether an LXC container with this name already exists
       ansible.builtin.shell: |
         set -o pipefail
-        pct list | awk -v name="{{ ct_name }}" '$3==name {print $1}'
+        pct list | awk -v name="{{ resolved_ct_name }}" '$3==name {print $1}'
       args:
         executable: /bin/bash
       register: existing_ct
@@ -389,7 +403,7 @@
           # multiple stray positional args instead of failing cleanly.
           ansible.builtin.command: >-
             pct create {{ ctid }} {{ lxc_template_volid }}
-            --hostname "{{ ct_name }}"
+            --hostname "{{ resolved_ct_name }}"
             --memory {{ memory }}
             --cores {{ cores }}
             --rootfs {{ resolved_storage }}:{{ ct_disk_gb }}
@@ -677,23 +691,23 @@
       ansible.builtin.set_fact:
         tailscale_join_script: "{{ lookup('template', playbook_dir + '/templates/tailscale-join.sh.j2') }}"
       vars:
-        tailscale_hostname: "{{ ct_name }}"
+        tailscale_hostname: "{{ resolved_ct_name }}"
       no_log: true
 
     - name: Stage the join script on the Proxmox host
       ansible.builtin.copy:
         content: "{{ tailscale_join_script }}"
-        dest: "/tmp/{{ ct_name }}-tailscale-join.sh"
+        dest: "/tmp/{{ resolved_ct_name }}-tailscale-join.sh"
         mode: "0700"
       no_log: true
 
     - name: Push the join script into the container
-      ansible.builtin.command: pct push {{ ctid }} /tmp/{{ ct_name }}-tailscale-join.sh /root/tailscale-join.sh --perms 700
+      ansible.builtin.command: pct push {{ ctid }} /tmp/{{ resolved_ct_name }}-tailscale-join.sh /root/tailscale-join.sh --perms 700
       changed_when: true
 
     - name: Remove the staged script from the Proxmox host
       ansible.builtin.file:
-        path: "/tmp/{{ ct_name }}-tailscale-join.sh"
+        path: "/tmp/{{ resolved_ct_name }}-tailscale-join.sh"
         state: absent
 
     - name: Start the Tailscale join script inside the container as a transient systemd unit
@@ -709,7 +723,7 @@
 
     - name: Check (briefly) whether the container is already reachable over the tailnet
       ansible.builtin.wait_for:
-        host: "{{ ct_name }}"
+        host: "{{ resolved_ct_name }}"
         port: 22
         timeout: 60
       delegate_to: localhost
@@ -725,10 +739,10 @@
       # own exposure model (path routing, tcp_funnel_port, etc.).
       ansible.builtin.debug:
         msg: >-
-          LXC container '{{ ct_name }}' (CTID {{ ctid }}) is created with Docker installed and running.
-          {{ 'It is already reachable over Tailscale SSH as ' ~ ct_name ~ '.'
+          LXC container '{{ resolved_ct_name }}' (CTID {{ ctid }}) is created with Docker installed and running.
+          {{ 'It is already reachable over Tailscale SSH as ' ~ resolved_ct_name ~ '.'
              if lxc_tailnet_reachability is succeeded
              else 'Not yet confirmed reachable over the tailnet - most likely still pending manual approval in '
                   ~ 'your Tailscale admin console. Approve it there before deploying anything onto it.' }}
-          Deploy and expose apps onto it with Install_Docker_And_App.yml, using target_host="{{ ct_name }}"
+          Deploy and expose apps onto it with Install_Docker_And_App.yml, using target_host="{{ resolved_ct_name }}"
           and vm_user="root".

@@ -6,10 +6,24 @@
     target_host: "edgecompute-lxc01"  # HARDCODED for UI testing - targets the LXC from Create_LXC_App.yml's test run
     vm_user: "root"                   # HARDCODED for UI testing - "root" because target_host above is an LXC container, not a VM
   tasks:
+    - name: Force target_host/vm_user for this UI-testing round, ignoring whatever the caller supplies
+      # extra_vars (AWX Job Template "Extra Variables", or a launch-time
+      # payload) always outrank this file's own vars: block, so a bad
+      # target_host/vm_user arriving that way (confirmed live: the
+      # EdgeCompute frontend was stamping target_host/vm_name/ct_name with
+      # a generic "<inventory name> / <host IP>" label on every launch)
+      # can't be fixed by reassigning target_host/vm_user themselves -
+      # set_fact can never override a variable that also arrived as an
+      # extra_var. Computing distinctly-named facts and using ONLY those
+      # names downstream is the one way around it.
+      ansible.builtin.set_fact:
+        resolved_target_host: "edgecompute-lxc01"
+        resolved_vm_user: "root"
+
     - name: Add target VM to in-memory inventory
       ansible.builtin.add_host:
-        name: "{{ target_host }}"
-        ansible_user: "{{ vm_user }}"
+        name: "{{ resolved_target_host }}"
+        ansible_user: "{{ resolved_vm_user }}"
         groups: docker_target
 
 - name: Install Docker, Compose and Traefik, then deploy the chosen apps
@@ -173,7 +187,7 @@
           ansible.builtin.set_fact:
             funnel_enable_script: "{{ lookup('template', playbook_dir + '/templates/enable-funnel.sh.j2') }}"
           vars:
-            tailscale_hostname: "{{ target_host }}"
+            tailscale_hostname: "{{ inventory_hostname }}"
             funnel_port: "{{ expose_port }}"
 
         - name: Push the Funnel enable script to the VM
@@ -190,11 +204,11 @@
     - name: Show access instructions
       ansible.builtin.debug:
         msg: >-
-          Deployed on {{ target_host }} behind Traefik (ports 80/443, routed by path - reachable via the tailnet
+          Deployed on {{ inventory_hostname }} behind Traefik (ports 80/443, routed by path - reachable via the tailnet
           hostname, tailnet IP, or public Funnel URL alike):
           {% for a in docker_apps %}{% set catalog_entry = docker_app_catalog[a.name] | default({}) %}{% set is_http = a.expose_http | default(catalog_entry.expose_http | default(true)) %}{{ a.name }}{{ (' via TCP Funnel on port ' ~ a.tcp_funnel_port ~ ' (reachable outside the tailnet)') if a.tcp_funnel_port is defined else (' at path ' ~ (a.path_prefix | default('/')) if is_http else ' (internal-only, no path/Funnel access)') }}{{ ', ' if not loop.last else '' }}{% endfor %}.
-          {{ ('A background script on ' ~ target_host ~ ' is waiting for tailnet admin approval, then will expose it '
-              ~ 'at https://' ~ target_host ~ '.<your-tailnet>.ts.net - check /var/log/tailscale-funnel.log there for status.')
+          {{ ('A background script on ' ~ inventory_hostname ~ ' is waiting for tailnet admin approval, then will expose it '
+              ~ 'at https://' ~ inventory_hostname ~ '.<your-tailnet>.ts.net - check /var/log/tailscale-funnel.log there for status.')
              if (expose_to_internet | bool)
-             else ('Private - reachable only over the tailnet at ' ~ target_host ~ ' (or its tailnet IP).'
+             else ('Private - reachable only over the tailnet at ' ~ inventory_hostname ~ ' (or its tailnet IP).'
                    ~ ' Re-run this job with expose_to_internet=true if you want it public.') }}
