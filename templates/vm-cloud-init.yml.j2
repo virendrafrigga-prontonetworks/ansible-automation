@@ -1,9 +1,9 @@
 #cloud-config
-hostname: {{ vm_name }}
+hostname: {{ resolved_vm_name }}
 manage_etc_hosts: true
 
 users:
-  - name: {{ vm_user }}
+  - name: {{ resolved_vm_user }}
     gecos: Provisioned by Ansible
     sudo: ALL=(ALL) NOPASSWD:ALL
     shell: /bin/bash
@@ -23,5 +23,13 @@ write_files:
       {{ tailscale_join_script | indent(6) }}
 
 runcmd:
+  # curl is installed explicitly here, not left to the packages: list above -
+  # cloud-init runs runcmd (cloud_config_modules stage) BEFORE packages:
+  # (cloud_final_modules stage), regardless of file order, so curl from
+  # packages: isn't actually present yet when tailscale-join.sh needs it.
+  # Confirmed as the reason Tailscale never joined: the join script's
+  # `curl -fsSL https://tailscale.com/install.sh | sh` died immediately
+  # (set -euo pipefail) with curl missing, before ever running tailscale up.
+  - apt-get update && apt-get install -y curl qemu-guest-agent
   - systemctl enable --now qemu-guest-agent
   - /usr/local/bin/tailscale-join.sh

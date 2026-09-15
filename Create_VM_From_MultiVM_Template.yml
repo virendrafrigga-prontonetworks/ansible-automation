@@ -86,6 +86,7 @@
       # pre-emptively, in case the frontend's payload ever includes them too.
       ansible.builtin.set_fact:
         resolved_vm_name: "edgecompute-vm02"
+        resolved_vm_user: "pronto"
         resolved_expose_to_internet: true
         resolved_expose_port: 80
 

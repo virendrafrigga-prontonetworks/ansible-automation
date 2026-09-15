@@ -687,6 +687,27 @@
       ansible.builtin.command: pct exec {{ ctid }} -- systemctl enable --now docker
       changed_when: true
 
+    - name: Check if curl is already installed inside the container
+      # tailscale-join.sh below needs curl to fetch Tailscale's own
+      # installer - confirmed live: the Docker-only refactor of this
+      # playbook dropped an old app-install task that used to install curl
+      # as an incidental side effect of installing any app, so it silently
+      # stopped being present and the join script died on its first line
+      # (set -euo pipefail) with no visible failure in AWX, since it runs
+      # as a detached systemd unit. Checked unconditionally, not gated
+      # behind the Docker install above, so a re-run against an
+      # already-Docker-ready container still gets curl if it's missing.
+      ansible.builtin.command: pct exec {{ ctid }} -- curl --version
+      register: curl_check
+      changed_when: false
+      failed_when: false
+
+    - name: Install curl inside the container
+      when: curl_check.rc != 0
+      ansible.builtin.command: >-
+        pct exec {{ ctid }} -- bash -c "apt-get update && apt-get install -y curl"
+      changed_when: true
+
     - name: Render the Tailscale join script content (matches post_boot.sh's proven flags)
       ansible.builtin.set_fact:
         tailscale_join_script: "{{ lookup('template', playbook_dir + '/templates/tailscale-join.sh.j2') }}"
