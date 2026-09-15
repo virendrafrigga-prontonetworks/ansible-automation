@@ -383,9 +383,13 @@
             mode: "0644"
 
         - name: Create the LXC container
+          # ct_name is quoted here - command: shlex-splits the whole string
+          # after Jinja substitution, so an unquoted value containing spaces
+          # (e.g. an unexpected extra_vars override) silently breaks into
+          # multiple stray positional args instead of failing cleanly.
           ansible.builtin.command: >-
             pct create {{ ctid }} {{ lxc_template_volid }}
-            --hostname {{ ct_name }}
+            --hostname "{{ ct_name }}"
             --memory {{ memory }}
             --cores {{ cores }}
             --rootfs {{ resolved_storage }}:{{ ct_disk_gb }}

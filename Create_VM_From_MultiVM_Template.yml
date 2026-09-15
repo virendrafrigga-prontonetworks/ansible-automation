@@ -219,7 +219,11 @@
             new_vmid: "{{ nextid.stdout | trim }}"
 
         - name: Clone the VM from the template
-          ansible.builtin.command: qm clone {{ template_id }} {{ new_vmid }} --name {{ vm_name }} --full
+          # vm_name is quoted here - command: shlex-splits the whole string
+          # after Jinja substitution, so an unquoted value containing spaces
+          # (e.g. an unexpected extra_vars override) silently breaks into
+          # multiple stray positional args instead of failing cleanly.
+          ansible.builtin.command: qm clone {{ template_id }} {{ new_vmid }} --name "{{ vm_name }}" --full
           changed_when: true
 
         - name: Configure cloned VM hardware
