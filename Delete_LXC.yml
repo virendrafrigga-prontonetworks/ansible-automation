@@ -5,7 +5,11 @@
   become: true
 
   vars:
-    ct_name: "docker-lxc-test01"  # HARDCODED for UI testing - matches Create_LXC_App.yml's test ct_name
+    # HARDCODED: forces the SSH user the tailnet ACL actually permits for
+    # this host, since AWX's credential/inventory was passing "admin" (its
+    # own login user), which the ACL rejects - see Create_LXC_App.yml.
+    ansible_user: root
+    ct_name: "edgecompute-lxc01"  # HARDCODED for UI testing - matches Create_LXC_App.yml's test ct_name
 
   tasks:
     - name: Look up the container's ID by name

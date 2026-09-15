@@ -3,7 +3,7 @@
   hosts: localhost
   gather_facts: false
   vars:
-    target_host: "docker-lxc-test01"  # HARDCODED for UI testing - matches Install_Docker_And_App.yml's test target_host
+    target_host: "edgecompute-lxc01"  # HARDCODED for UI testing - matches Install_Docker_And_App.yml's test target_host
     vm_user: "root"                   # HARDCODED for UI testing - "root" because target_host above is an LXC container
   tasks:
     - name: Add target VM to in-memory inventory
@@ -18,10 +18,10 @@
   gather_facts: false
 
   vars:
-    # HARDCODED for UI testing - matches the docker_apps deployed by
-    # Install_Docker_And_App.yml's test run (its default is nginx)
+    # HARDCODED for UI testing - matches the docker_apps entry deployed by
+    # Install_Docker_And_App.yml's test run
     app_names:
-      - "nginx"
+      - "edgecompute-nginx"
 
   tasks:
     - name: Delete each requested app

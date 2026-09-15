@@ -3,7 +3,7 @@
   hosts: localhost
   gather_facts: false
   vars:
-    target_host: "docker-lxc-test01"  # HARDCODED for UI testing - frontend can't pass extra_vars yet (targets the LXC from Create_LXC_App.yml's test run)
+    target_host: "edgecompute-lxc01"  # HARDCODED for UI testing - targets the LXC from Create_LXC_App.yml's test run
     vm_user: "root"                   # HARDCODED for UI testing - "root" because target_host above is an LXC container, not a VM
   tasks:
     - name: Add target VM to in-memory inventory
@@ -54,7 +54,13 @@
     # vars/docker_apps.yml); a name with no matching preset is a fully
     # custom app and needs its own image/port.
     docker_apps:
-      - name: nginx
+      # HARDCODED for UI testing - "edgecompute-" prefix so the deployed
+      # container itself is identifiable, not just its parent VM/LXC.
+      # No longer matches the "nginx" catalog key by name, so image/port
+      # are given explicitly instead of relying on the catalog default.
+      - name: edgecompute-nginx
+        image: "nginx:latest"
+        port: 80
         path_prefix: "/"
     wordpress_db_password: ""                  # From AWX Survey/Vault - required when wordpress is in docker_apps
     # Private by default - only expose to the real internet if explicitly asked.

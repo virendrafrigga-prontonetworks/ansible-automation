@@ -8,6 +8,15 @@
     - vars/os_images.yml
 
   vars:
+    # HARDCODED: AWX's attached Machine credential/inventory was passing
+    # "admin" (AWX's own login user) as the SSH user for the Proxmox host,
+    # which the tailnet's SSH ACL policy rejects outright ("tailnet policy
+    # does not permit you to SSH as user \"admin\""). A play-level
+    # ansible_user outranks whatever the credential/inventory supplies, so
+    # this forces the correct user regardless. Confirm your Tailscale ACL's
+    # ssh rules actually permit "root" for this host's tag - change this if
+    # a different user is the one actually permitted.
+    ansible_user: root
     proxmox_host: "{{ inventory_hostname }}"
     iso_dir: "/var/lib/vz/template/iso"
     local_cache_dir: "{{ playbook_dir }}/.image_cache"
@@ -39,7 +48,7 @@
       aarch64: arm64
     target_arch: "{{ vm_arch_map[ansible_architecture] | default(ansible_architecture) }}"
 
-    vm_name: "vm-test01"                   # HARDCODED for UI testing - frontend can't pass extra_vars yet
+    vm_name: "edgecompute-vm01"             # HARDCODED for UI testing - "edgecompute-" prefix identifies resources created by the EdgeCompute UI
     vm_user: "pronto"                      # From AWX Survey - standard automation user, matches post_boot.sh's baremetal convention
     memory: 2048                            # From AWX Survey
     cores: 2                                # From AWX Survey
