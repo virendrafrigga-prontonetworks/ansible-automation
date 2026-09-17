@@ -3,7 +3,7 @@
   hosts: localhost
   gather_facts: false
   vars:
-    target_host: "edgecompute-vm02"   # HARDCODED for UI testing - deploying Odoo onto the VM this time
+    target_host: "edgecompute-lxc03"   # HARDCODED for UI testing - deploying Odoo onto the VM this time
     vm_user: "pronto"                 # HARDCODED for UI testing - "pronto" because target_host above is a VM, not an LXC
   tasks:
     - name: Force target_host/vm_user for this UI-testing round, ignoring whatever the caller supplies
@@ -17,7 +17,7 @@
       # extra_var. Computing distinctly-named facts and using ONLY those
       # names downstream is the one way around it.
       ansible.builtin.set_fact:
-        resolved_target_host: "edgecompute-vm03"
+        resolved_target_host: "edgecompute-lxc03"
         resolved_vm_user: "pronto"
 
     - name: Add target VM to in-memory inventory
