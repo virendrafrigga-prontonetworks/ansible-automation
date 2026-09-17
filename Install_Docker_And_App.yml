@@ -17,7 +17,7 @@
       # extra_var. Computing distinctly-named facts and using ONLY those
       # names downstream is the one way around it.
       ansible.builtin.set_fact:
-        resolved_target_host: "edgecompute-vm02"
+        resolved_target_host: "edgecompute-vm03"
         resolved_vm_user: "pronto"
 
     - name: Add target VM to in-memory inventory
