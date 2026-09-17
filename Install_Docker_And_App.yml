@@ -3,8 +3,8 @@
   hosts: localhost
   gather_facts: false
   vars:
-    target_host: "edgecompute-lxc03"   # HARDCODED for UI testing - deploying Odoo onto the VM this time
-    vm_user: "pronto"                 # HARDCODED for UI testing - "pronto" because target_host above is a VM, not an LXC
+    target_host: "edgecompute-lxc03"   # HARDCODED for UI testing - testing docker deploy onto the LXC on the new host
+    vm_user: "root"                    # HARDCODED for UI testing - "root" because target_host above is an LXC, not a VM (LXC containers have no pronto user)
   tasks:
     - name: Force target_host/vm_user for this UI-testing round, ignoring whatever the caller supplies
       # extra_vars (AWX Job Template "Extra Variables", or a launch-time
@@ -18,7 +18,7 @@
       # names downstream is the one way around it.
       ansible.builtin.set_fact:
         resolved_target_host: "edgecompute-lxc03"
-        resolved_vm_user: "pronto"
+        resolved_vm_user: "root"
 
     - name: Add target VM to in-memory inventory
       ansible.builtin.add_host:
