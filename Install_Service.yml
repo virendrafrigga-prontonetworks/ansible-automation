@@ -16,7 +16,7 @@
   hosts: localhost
   gather_facts: false
   vars:
-    target_host: "edgecompute-vm03"  # HARDCODED for UI testing - the VM/LXC's tailnet hostname (vm_name/ct_name from Create_*)
+    target_host: "edgecompute-lxc03"  # HARDCODED for UI testing - the VM/LXC's tailnet hostname (vm_name/ct_name from Create_*)
     vm_user: "pronto"                # HARDCODED for UI testing - "pronto" for a VM, "root" for an LXC container
   tasks:
     - name: Add target to in-memory inventory
