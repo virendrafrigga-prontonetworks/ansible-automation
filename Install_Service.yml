@@ -19,10 +19,22 @@
     target_host: "edgecompute-lxc03"  # HARDCODED for UI testing - the VM/LXC's tailnet hostname (vm_name/ct_name from Create_*)
     vm_user: "root"                   # HARDCODED for UI testing - "root" because target_host above is an LXC, not a VM (LXC containers have no pronto user)
   tasks:
+    - name: Force target_host/vm_user for this UI-testing round, ignoring whatever the caller supplies
+      # extra_vars (AWX Job Template "Extra Variables", or a launch-time
+      # payload) always outrank this file's own vars: block - confirmed
+      # live: the EdgeCompute frontend was stamping target_host with a
+      # generic "<inventory name> / <host IP>" label ("Edge-inventory /
+      # 100.85.205.16"), which then failed SSH with "hostname contains
+      # invalid characters". Same fix as Install_Docker_And_App.yml -
+      # compute distinctly-named facts and use ONLY those names downstream.
+      ansible.builtin.set_fact:
+        resolved_target_host: "edgecompute-lxc03"
+        resolved_vm_user: "root"
+
     - name: Add target to in-memory inventory
       ansible.builtin.add_host:
-        name: "{{ target_host }}"
-        ansible_user: "{{ vm_user }}"
+        name: "{{ resolved_target_host }}"
+        ansible_user: "{{ resolved_vm_user }}"
         groups: service_target
 
 - name: Install, configure, and start a service via an arbitrary command sequence
@@ -86,6 +98,6 @@
     - name: Show result
       ansible.builtin.debug:
         msg: >-
-          Service '{{ service_name }}' installed on '{{ target_host }}' - re-running this job re-applies the
+          Service '{{ service_name }}' installed on '{{ inventory_hostname }}' - re-running this job re-applies the
           same install/configure/start commands (each should be safe to repeat), it doesn't track separate
           install state itself.
