@@ -8,15 +8,21 @@
     - vars/os_images.yml
 
   vars:
-    # HARDCODED: AWX's attached Machine credential/inventory was passing
-    # "admin" (AWX's own login user) as the SSH user for the Proxmox host,
-    # which the tailnet's SSH ACL policy rejects outright ("tailnet policy
-    # does not permit you to SSH as user \"admin\""). A play-level
-    # ansible_user outranks whatever the credential/inventory supplies, so
-    # this forces the correct user regardless. Confirm your Tailscale ACL's
-    # ssh rules actually permit "root" for this host's tag - change this if
-    # a different user is the one actually permitted.
-    ansible_user: root
+    # HARDCODED per-host SSH policy, keyed by the Proxmox host's IP as it
+    # appears in AWX inventory. Different physical hosts here have
+    # different access models: 100.126.83.57 only permits root SSH
+    # (its tailnet ACL rejected "admin" outright), while 100.85.205.16
+    # ("this new image") has no root SSH and no NOPASSWD sudo for
+    # pronto either - it needs pronto + a sudo password. A play-level
+    # var outranks whatever the credential/inventory supplies (confirmed
+    # live - that's exactly why the single-host root override worked
+    # before), so a single hardcoded value can't serve two hosts with
+    # different policies at once - this has to be a lookup keyed by
+    # host identity. Add a new host's entry here as more come online.
+    ssh_policy_by_host:
+      "100.85.205.16": { user: pronto, become_password: "wavespot@202!" }
+    ansible_user: "{{ ssh_policy_by_host[inventory_hostname].user | default('root') }}"
+    ansible_become_password: "{{ ssh_policy_by_host[inventory_hostname].become_password | default(omit) }}"
     proxmox_host: "{{ inventory_hostname }}"
     iso_dir: "/var/lib/vz/template/iso"
     local_cache_dir: "{{ playbook_dir }}/.image_cache"
@@ -48,7 +54,7 @@
       aarch64: arm64
     target_arch: "{{ vm_arch_map[ansible_architecture] | default(ansible_architecture) }}"
 
-    vm_name: "edgecompute-vm02"             # HARDCODED for UI testing - "edgecompute-" prefix identifies resources created by the EdgeCompute UI
+    vm_name: "edgecompute-vm03"             # HARDCODED for UI testing - "edgecompute-" prefix identifies resources created by the EdgeCompute UI
     vm_user: "pronto"                      # From AWX Survey - standard automation user, matches post_boot.sh's baremetal convention
     memory: 2048                            # From AWX Survey
     cores: 2                                # From AWX Survey
@@ -85,7 +91,7 @@
       # around it. expose_to_internet/expose_port get the same treatment
       # pre-emptively, in case the frontend's payload ever includes them too.
       ansible.builtin.set_fact:
-        resolved_vm_name: "edgecompute-vm02"
+        resolved_vm_name: "edgecompute-vm03"
         resolved_vm_user: "pronto"
         resolved_expose_to_internet: true
         resolved_expose_port: 80

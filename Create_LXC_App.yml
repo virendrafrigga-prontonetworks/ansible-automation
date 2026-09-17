@@ -5,15 +5,16 @@
   become: true
 
   vars:
-    # HARDCODED: AWX's attached Machine credential/inventory was passing
-    # "admin" (AWX's own login user) as the SSH user for the Proxmox host,
-    # which the tailnet's SSH ACL policy rejects outright ("tailnet policy
-    # does not permit you to SSH as user \"admin\""). A play-level
-    # ansible_user outranks whatever the credential/inventory supplies, so
-    # this forces the correct user regardless. Confirm your Tailscale ACL's
-    # ssh rules actually permit "root" for this host's tag - change this if
-    # a different user is the one actually permitted.
-    ansible_user: root
+    # HARDCODED per-host SSH policy, keyed by the Proxmox host's IP as it
+    # appears in AWX inventory - see the matching note in
+    # Create_VM_From_MultiVM_Template.yml. 100.85.205.16 ("this new
+    # image") has no root SSH and no NOPASSWD sudo for pronto - it needs
+    # pronto + a sudo password. Add a new host's entry here as more come
+    # online.
+    ssh_policy_by_host:
+      "100.85.205.16": { user: pronto, become_password: "wavespot@202!" }
+    ansible_user: "{{ ssh_policy_by_host[inventory_hostname].user | default('root') }}"
+    ansible_become_password: "{{ ssh_policy_by_host[inventory_hostname].become_password | default(omit) }}"
     local_cache_dir: "{{ playbook_dir }}/.image_cache"
     # Leave blank (default) to auto-detect from this host - picks the first
     # active storage that actually supports the content type needed.
@@ -30,7 +31,7 @@
     # where vmbr0 isn't the right one.
     bridge: "vmbr0"                        # HARDCODED for UI testing - frontend can't pass extra_vars yet
     os_template: "ubuntu-24.04-standard"    # From AWX Survey - Proxmox LXC template name (no version/arch suffix)
-    ct_name: "edgecompute-lxc02"             # HARDCODED for UI testing - "edgecompute-" prefix identifies resources created by the EdgeCompute UI
+    ct_name: "edgecompute-lxc03"             # HARDCODED for UI testing - "edgecompute-" prefix identifies resources created by the EdgeCompute UI
     memory: 1024                             # From AWX Survey
     cores: 1                                 # From AWX Survey
     ct_disk_gb: 8                            # From AWX Survey - plain GB number (pct's --rootfs unit, unlike qm resize's "8G" style)
@@ -116,7 +117,7 @@
       # pattern as resolved_storage/resolved_bridge below) is the one way
       # around it.
       ansible.builtin.set_fact:
-        resolved_ct_name: "edgecompute-lxc02"
+        resolved_ct_name: "edgecompute-lxc03"
         # Confirmed live: the EdgeCompute frontend's auto-generated Job
         # Template for this host had no Tailscale Auth Key credential
         # attached at all (only a generic SSH credential), so

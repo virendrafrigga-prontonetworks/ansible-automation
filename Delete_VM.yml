@@ -5,11 +5,13 @@
   become: true
 
   vars:
-    # HARDCODED: forces the SSH user the tailnet ACL actually permits for
-    # this host, since AWX's credential/inventory was passing "admin" (its
-    # own login user), which the ACL rejects - see Create_VM_From_MultiVM_Template.yml.
-    ansible_user: root
-    vm_name: "edgecompute-vm02"   # HARDCODED for UI testing - matches Create_VM_From_MultiVM_Template.yml's test vm_name
+    # HARDCODED per-host SSH policy, keyed by the Proxmox host's IP - see
+    # the matching note in Create_VM_From_MultiVM_Template.yml.
+    ssh_policy_by_host:
+      "100.85.205.16": { user: pronto, become_password: "wavespot@202!" }
+    ansible_user: "{{ ssh_policy_by_host[inventory_hostname].user | default('root') }}"
+    ansible_become_password: "{{ ssh_policy_by_host[inventory_hostname].become_password | default(omit) }}"
+    vm_name: "edgecompute-vm03"   # HARDCODED for UI testing - matches Create_VM_From_MultiVM_Template.yml's test vm_name
 
   tasks:
     - name: Force the VM name for this UI-testing round, ignoring any vm_name the caller supplies
@@ -19,7 +21,7 @@
       # always outrank this file's own vars: block, so reassigning vm_name
       # itself would be silently ignored.
       ansible.builtin.set_fact:
-        resolved_vm_name: "edgecompute-vm02"
+        resolved_vm_name: "edgecompute-vm03"
 
     - name: Look up the VM's ID by name
       ansible.builtin.shell: |
