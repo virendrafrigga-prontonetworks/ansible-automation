@@ -12,8 +12,11 @@
     # pronto + a sudo password. Add a new host's entry here as more come
     # online.
     ssh_policy_by_host:
-      "100.85.205.16": { user: pronto, become_password: "wavespot@202!" }
+      "100.85.205.16": { user: pronto, ssh_password: "wavespot@202!", become_password: "wavespot@202!" }
     ansible_user: "{{ ssh_policy_by_host[inventory_hostname].user | default('root') }}"
+    # Confirmed live via a manual `ssh pronto@<host>`: this host only has
+    # password auth set up for pronto, no authorized key.
+    ansible_password: "{{ ssh_policy_by_host[inventory_hostname].ssh_password | default(omit) }}"
     ansible_become_password: "{{ ssh_policy_by_host[inventory_hostname].become_password | default(omit) }}"
     local_cache_dir: "{{ playbook_dir }}/.image_cache"
     # Leave blank (default) to auto-detect from this host - picks the first

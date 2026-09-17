@@ -8,8 +8,9 @@
     # HARDCODED per-host SSH policy, keyed by the Proxmox host's IP - see
     # the matching note in Create_VM_From_MultiVM_Template.yml.
     ssh_policy_by_host:
-      "100.85.205.16": { user: pronto, become_password: "wavespot@202!" }
+      "100.85.205.16": { user: pronto, ssh_password: "wavespot@202!", become_password: "wavespot@202!" }
     ansible_user: "{{ ssh_policy_by_host[inventory_hostname].user | default('root') }}"
+    ansible_password: "{{ ssh_policy_by_host[inventory_hostname].ssh_password | default(omit) }}"
     ansible_become_password: "{{ ssh_policy_by_host[inventory_hostname].become_password | default(omit) }}"
     vm_name: "edgecompute-vm03"   # HARDCODED for UI testing - matches Create_VM_From_MultiVM_Template.yml's test vm_name
 

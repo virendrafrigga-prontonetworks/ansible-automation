@@ -20,8 +20,15 @@
     # different policies at once - this has to be a lookup keyed by
     # host identity. Add a new host's entry here as more come online.
     ssh_policy_by_host:
-      "100.85.205.16": { user: pronto, become_password: "wavespot@202!" }
+      "100.85.205.16": { user: pronto, ssh_password: "wavespot@202!", become_password: "wavespot@202!" }
     ansible_user: "{{ ssh_policy_by_host[inventory_hostname].user | default('root') }}"
+    # Confirmed live via a manual `ssh pronto@<host>`: this host only has
+    # password auth set up for pronto, no authorized key - Ansible's ssh
+    # connection plugin needs ansible_password explicitly to authenticate
+    # non-interactively (via sshpass), or it silently falls back to
+    # key-based auth and fails at the connection step entirely, before
+    # become/sudo is ever reached.
+    ansible_password: "{{ ssh_policy_by_host[inventory_hostname].ssh_password | default(omit) }}"
     ansible_become_password: "{{ ssh_policy_by_host[inventory_hostname].become_password | default(omit) }}"
     proxmox_host: "{{ inventory_hostname }}"
     iso_dir: "/var/lib/vz/template/iso"
