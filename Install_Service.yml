@@ -63,6 +63,12 @@
     # relying on it - package URLs/versions do change over time, and
     # this hasn't been run against every possible base image.
     install_commands:
+      # gnupg (for `gpg --dearmor` below) isn't installed by default on a
+      # bare LXC template - confirmed live: "gpg: command not found" (rc
+      # 127), which then made the Odoo repo appear unsigned and broke
+      # apt-get update entirely. Same class of gap as the missing curl we
+      # hit earlier for the Tailscale join script.
+      - "apt-get update && apt-get install -y gnupg"
       - "curl -fsSL https://nightly.odoo.com/odoo.key | gpg --dearmor -o /usr/share/keyrings/odoo-archive-keyring.gpg"
       - "echo 'deb [signed-by=/usr/share/keyrings/odoo-archive-keyring.gpg] https://nightly.odoo.com/18.0/nightly/deb/ ./' > /etc/apt/sources.list.d/odoo.list"
       - "apt-get update"
