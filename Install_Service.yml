@@ -17,7 +17,7 @@
   gather_facts: false
   vars:
     target_host: "edgecompute-lxc03"  # HARDCODED for UI testing - the VM/LXC's tailnet hostname (vm_name/ct_name from Create_*)
-    vm_user: "pronto"                # HARDCODED for UI testing - "pronto" for a VM, "root" for an LXC container
+    vm_user: "root"                   # HARDCODED for UI testing - "root" because target_host above is an LXC, not a VM (LXC containers have no pronto user)
   tasks:
     - name: Add target to in-memory inventory
       ansible.builtin.add_host:
