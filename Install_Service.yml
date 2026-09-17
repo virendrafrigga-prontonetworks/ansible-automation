@@ -1,0 +1,91 @@
+---
+# Generic native-service installer for a VM or LXC container already
+# created by Create_VM_From_MultiVM_Template.yml / Create_LXC_App.yml.
+# Unlike Install_Docker_And_App.yml (which deploys apps as Docker
+# containers), this playbook runs a plain sequence of shell commands
+# directly on the target as root - for installing/configuring/starting
+# any native (non-Docker) service: apt packages, a vendor's install
+# script, systemd unit setup, whatever the service actually needs.
+#
+# Connects the same way Install_Docker_And_App.yml does: add_host + SSH,
+# vm_user "pronto" for a VM or "root" for an LXC container - both already
+# have Tailscale SSH enabled from their Create_* run, so no separate
+# credential/password is needed here regardless of which Proxmox host
+# they were created on.
+- name: Register the target VM or LXC for this run
+  hosts: localhost
+  gather_facts: false
+  vars:
+    target_host: "edgecompute-vm03"  # HARDCODED for UI testing - the VM/LXC's tailnet hostname (vm_name/ct_name from Create_*)
+    vm_user: "pronto"                # HARDCODED for UI testing - "pronto" for a VM, "root" for an LXC container
+  tasks:
+    - name: Add target to in-memory inventory
+      ansible.builtin.add_host:
+        name: "{{ target_host }}"
+        ansible_user: "{{ vm_user }}"
+        groups: service_target
+
+- name: Install, configure, and start a service via an arbitrary command sequence
+  hosts: service_target
+  become: true
+  gather_facts: true
+
+  vars:
+    service_name: "odoo"  # Just a label used in task names/messages, not itself executed as anything.
+
+    # Each list runs in order, each item as its own root shell command.
+    # Safe to re-run - most install steps (apt-get install, adding a repo,
+    # useradd, etc.) are naturally idempotent on their own; a command that
+    # genuinely isn't should guard itself (e.g. append `|| true`, or a
+    # `test -f ... ||` prefix) rather than relying on this playbook to
+    # track state. configure_commands and start_command are both
+    # optional - leave either as an empty list/string if a service's own
+    # installer already handles that step (Odoo's official .deb below
+    # already creates its Postgres role and starts its own systemd unit,
+    # so configure_commands is empty and start_command is just a
+    # defensive re-assert, not doing real work on a normal run).
+    #
+    # HARDCODED example for UI testing - native (non-Docker) Odoo 18 on
+    # Ubuntu 24.04 (noble), via Odoo's own official nightly-builds apt
+    # repo. Verify this against Odoo's current install docs before
+    # relying on it - package URLs/versions do change over time, and
+    # this hasn't been run against every possible base image.
+    install_commands:
+      - "curl -fsSL https://nightly.odoo.com/odoo.key | gpg --dearmor -o /usr/share/keyrings/odoo-archive-keyring.gpg"
+      - "echo 'deb [signed-by=/usr/share/keyrings/odoo-archive-keyring.gpg] https://nightly.odoo.com/18.0/nightly/deb/ ./' > /etc/apt/sources.list.d/odoo.list"
+      - "apt-get update"
+      - "DEBIAN_FRONTEND=noninteractive apt-get install -y odoo"
+    configure_commands: []
+    start_command: "systemctl enable --now odoo"
+
+  tasks:
+    - name: Run each install command in order
+      ansible.builtin.shell: "{{ item }}"
+      args:
+        executable: /bin/bash
+      loop: "{{ install_commands }}"
+      loop_control:
+        label: "{{ item }}"
+      changed_when: true
+
+    - name: Run each configure command in order
+      ansible.builtin.shell: "{{ item }}"
+      args:
+        executable: /bin/bash
+      loop: "{{ configure_commands }}"
+      loop_control:
+        label: "{{ item }}"
+      when: configure_commands | length > 0
+      changed_when: true
+
+    - name: Start/enable the service
+      ansible.builtin.command: "{{ start_command }}"
+      when: start_command | length > 0
+      changed_when: true
+
+    - name: Show result
+      ansible.builtin.debug:
+        msg: >-
+          Service '{{ service_name }}' installed on '{{ target_host }}' - re-running this job re-applies the
+          same install/configure/start commands (each should be safe to repeat), it doesn't track separate
+          install state itself.
