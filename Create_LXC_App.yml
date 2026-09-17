@@ -35,9 +35,15 @@
     bridge: "vmbr0"                        # HARDCODED for UI testing - frontend can't pass extra_vars yet
     os_template: "ubuntu-24.04-standard"    # From AWX Survey - Proxmox LXC template name (no version/arch suffix)
     ct_name: "edgecompute-lxc03"             # HARDCODED for UI testing - "edgecompute-" prefix identifies resources created by the EdgeCompute UI
-    memory: 1024                             # From AWX Survey
-    cores: 1                                 # From AWX Survey
-    ct_disk_gb: 8                            # From AWX Survey - plain GB number (pct's --rootfs unit, unlike qm resize's "8G" style)
+    # Confirmed live: the 1024MB/1-core/8GB defaults ran out of disk
+    # space ("no space left on device") partway through installing Odoo
+    # + Postgres (Docker image pulls or native apt packages both have a
+    # real footprint), and 1GB RAM / 1 core is tight for that workload
+    # regardless - bumped all three so a fresh container has enough
+    # room out of the box.
+    memory: 2048                             # From AWX Survey
+    cores: 2                                 # From AWX Survey
+    ct_disk_gb: 20                           # From AWX Survey - plain GB number (pct's --rootfs unit, unlike qm resize's "8G" style)
 
     # Passes the Proxmox host's Mali GPU (/dev/mali0) and DRM render nodes
     # (/dev/dri) into the container, when present - detected automatically,
