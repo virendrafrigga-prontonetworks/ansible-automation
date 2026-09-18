@@ -3,7 +3,7 @@
   hosts: localhost
   gather_facts: false
   vars:
-    target_host: "edgecompute-lxc03"   # HARDCODED for UI testing - testing docker deploy onto the LXC on the new host
+    target_host: "edgecompute-lxc04"   # HARDCODED for UI testing - testing docker deploy onto the LXC on the new host
     vm_user: "root"                    # HARDCODED for UI testing - "root" because target_host above is an LXC, not a VM (LXC containers have no pronto user)
   tasks:
     - name: Force target_host/vm_user for this UI-testing round, ignoring whatever the caller supplies
