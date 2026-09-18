@@ -34,7 +34,7 @@
     # where vmbr0 isn't the right one.
     bridge: "vmbr0"                        # HARDCODED for UI testing - frontend can't pass extra_vars yet
     os_template: "ubuntu-24.04-standard"    # From AWX Survey - Proxmox LXC template name (no version/arch suffix)
-    ct_name: "edgecompute-lxc03"             # HARDCODED for UI testing - "edgecompute-" prefix identifies resources created by the EdgeCompute UI
+    ct_name: "edgecompute-lxc04"             # HARDCODED for UI testing - "edgecompute-" prefix identifies resources created by the EdgeCompute UI
     # Confirmed live: the 1024MB/1-core/8GB defaults ran out of disk
     # space ("no space left on device") partway through installing Odoo
     # + Postgres (Docker image pulls or native apt packages both have a
@@ -126,7 +126,7 @@
       # pattern as resolved_storage/resolved_bridge below) is the one way
       # around it.
       ansible.builtin.set_fact:
-        resolved_ct_name: "edgecompute-lxc03"
+        resolved_ct_name: "edgecompute-lxc04"
         # Confirmed live: the EdgeCompute frontend's auto-generated Job
         # Template for this host had no Tailscale Auth Key credential
         # attached at all (only a generic SSH credential), so
